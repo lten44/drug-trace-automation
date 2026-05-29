@@ -226,7 +226,7 @@ def generate_filename(meta, drug_names=None):
         name_str = "药品"
     for ch in r'\/:*?"<>|':
         receiver, name_str, doc_no = receiver.replace(ch,""), name_str.replace(ch,""), doc_no.replace(ch,"")
-    return f"汕头药品批发企业-{receiver}-{name_str}-{doc_no}.xlsx"
+    return f"药品批发企业-{receiver}-{name_str}-{doc_no}.xlsx"
 
 def write_result_excel(original_data, level_one_map, batch_no_map, output_dir=OUTPUT_FOLDER):
     """新建表格，每行写完整药品信息，删除零头数/生产信息/验证信息列"""
