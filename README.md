@@ -1,4 +1,4 @@
-# 国瑞新特药追朔码自动处理软件
+# 药品批发企业追朔码自动处理软件
 
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -40,8 +40,8 @@
 
 #### 方式一：使用预编译版本（推荐）
 
-1. 下载 `国瑞新特药追朔码自动处理软件.exe`
-2. 放置到 `E:\国瑞新特药追朔码自动处理软件\` 目录
+1. 下载 `药品批发企业追朔码自动处理软件.exe`
+2. 放置到 `E:\药品批发企业追朔码自动处理软件\` 目录
 3. 创建桌面快捷方式
 4. 双击运行
 
@@ -83,7 +83,7 @@ drug_trace/
 ├── LICENSE             # MIT 许可证
 ├── DEVELOPMENT_LOG.md  # 开发历程文档
 ├── .gitignore          # Git 忽略规则
-├── 国瑞新特药追朔码自动处理软件.spec  # PyInstaller 构建配置
+├── 药品批发企业追朔码自动处理软件.spec  # PyInstaller 构建配置
 └── templates/
     └── index.html      # Flask 版本前端模板
 ```

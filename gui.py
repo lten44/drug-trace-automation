@@ -14,8 +14,8 @@ import shutil
 VERSION = "v2.0"
 
 # 自动更新配置
-UPDATE_DIR = r'E:\国瑞新特药追朔码自动处理软件'
-UPDATE_EXE_NAME = "国瑞新特药追朔码自动处理软件.exe"
+UPDATE_DIR = r'E:\药品批发企业追朔码自动处理软件'
+UPDATE_EXE_NAME = "药品批发企业追朔码自动处理软件.exe"
 VERSION_FILE = "version.json"
 
 if getattr(sys, 'frozen', False):
@@ -226,7 +226,7 @@ def generate_filename(meta, drug_names=None):
         name_str = "药品"
     for ch in r'\/:*?"<>|':
         receiver, name_str, doc_no = receiver.replace(ch,""), name_str.replace(ch,""), doc_no.replace(ch,"")
-    return f"汕头国瑞新特药-{receiver}-{name_str}-{doc_no}.xlsx"
+    return f"药品批发企业-{receiver}-{name_str}-{doc_no}.xlsx"
 
 def write_result_excel(original_data, level_one_map, batch_no_map, output_dir=OUTPUT_FOLDER):
     """新建表格，每行写完整药品信息，删除零头数/生产信息/验证信息列"""
@@ -664,7 +664,7 @@ class DrugTraceApp:
         # ===== 标题区域 =====
         title_frame = tk.Frame(self.root, bg=PRIMARY, pady=18)
         title_frame.pack(fill=tk.X)
-        tk.Label(title_frame, text=f"💊 国瑞新特药追朔码自动处理软件 {VERSION}",
+        tk.Label(title_frame, text=f"💊 药品批发企业追朔码自动处理软件 {VERSION}",
                 font=("Microsoft YaHei", 20, "bold"), bg=PRIMARY, fg="white").pack()
         tk.Label(title_frame, text="自动查询追溯码关联关系，生成1级码表格",
                 font=("Microsoft YaHei", 10), bg=PRIMARY, fg="#d0d8ff").pack(pady=(4, 0))
