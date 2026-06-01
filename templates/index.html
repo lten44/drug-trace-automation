@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>药品追溯码处理工具</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            width: 100%;
+            max-width: 600px;
+            padding: 40px;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .section {
+            margin-bottom: 25px;
+        }
+        
+        .section-title {
+            font-size: 14px;
+            color: #333;
+            margin-bottom: 10px;
+            font-weight: 500;
+        }
+        
+        .file-selector {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .file-path {
+            flex: 1;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 14px;
+            background: #fafafa;
+            color: #666;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 10px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+        
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #666;
+            white-space: nowrap;
+        }
+        
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            width: 100%;
+            padding: 16px;
+            font-size: 16px;
+            margin-top: 20px;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .settings {
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 6px;
+        }
+        
+        .form-group input[type="text"] {
+            width: 100%;
+            padding: 10px 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 13px;
+        }
+        
+        .progress-container {
+            margin-top: 25px;
+            display: none;
+        }
+        
+        .progress-container.active {
+            display: block;
+        }
+        
+        .progress-bar {
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            border-radius: 4px;
+            transition: width 0.3s ease;
+            width: 0%;
+        }
+        
+        .progress-text {
+            font-size: 13px;
+            color: #666;
+            text-align: center;
+        }
+        
+        .status {
+            margin-top: 15px;
+            padding: 12px 15px;
+            border-radius: 10px;
+            font-size: 13px;
+            display: none;
+        }
+        
+        .status.active {
+            display: block;
+        }
+        
+        .status.success {
+            background: #f6ffed;
+            border: 1px solid #b7eb8f;
+            color: #52c41a;
+        }
+        
+        .status.error {
+            background: #fff2f0;
+            border: 1px solid #ffccc7;
+            color: #ff4d4f;
+        }
+        
+        .status.info {
+            background: #e6f7ff;
+            border: 1px solid #91d5ff;
+            color: #1890ff;
+        }
+        
+        .hint-box {
+            background: #fffbe6;
+            border: 1px solid #ffe58f;
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+            font-size: 13px;
+            color: #666;
+        }
+        
+        .hint-box strong {
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>药品追溯码处理工具</h1>
+        <p class="subtitle">自动查询追溯码关联关系，生成1级码表格</p>
+        
+        <div class="section">
+            <div class="section-title">📁 选择Excel文件</div>
+            <div class="file-selector">
+                <div class="file-path" id="inputFilePath">点击右侧按钮选择文件...</div>
+                <button class="btn btn-secondary" onclick="selectInputFile()">浏览</button>
+            </div>
+        </div>
+        
+        <div class="settings">
+            <div class="section-title">⚙️ 设置</div>
+            
+            <div class="form-group">
+                <label>默认导出位置</label>
+                <div class="file-selector">
+                    <div class="file-path" id="outputPath">点击浏览选择文件夹...</div>
+                    <button class="btn btn-secondary" onclick="selectOutputPath()">浏览</button>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label>码上放心客户端窗口标题</label>
+                <input type="text" id="clientTitle" value="码上放心" placeholder="码上放心">
+            </div>
+        </div>
+        
+        <button class="btn btn-primary" id="processBtn" onclick="startProcess()" disabled>
+            开始处理
+        </button>
+        
+        <div class="progress-container" id="progressContainer">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="progress-text" id="progressText">准备中...</div>
+        </div>
+        
+        <div class="status" id="status"></div>
+        
+        <div class="hint-box">
+            <strong>使用提示：</strong><br>
+            1. 请确保码上放心客户端已打开并登录<br>
+            2. 处理过程中请勿关闭或最小化客户端<br>
+            3. 支持断点续传，中断后可重新运行继续处理
+        </div>
+    </div>
+    
+    <script>
+        let inputFile = '';
+        let outputPath = '';
+        let statusCheckInterval = null;
+        
+        // 页面加载时获取配置
+        fetch('/get_config')
+            .then(r => r.json())
+            .then(config => {
+                if (config.output_path) {
+                    outputPath = config.output_path;
+                    document.getElementById('outputPath').textContent = outputPath;
+                }
+            });
+        
+        function selectInputFile() {
+            fetch('/select_input_file', { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success && data.path) {
+                        inputFile = data.path;
+                        document.getElementById('inputFilePath').textContent = data.path;
+                        document.getElementById('processBtn').disabled = false;
+                    }
+                });
+        }
+        
+        function selectOutputPath() {
+            fetch('/select_output_path', { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success && data.path) {
+                        outputPath = data.path;
+                        document.getElementById('outputPath').textContent = data.path;
+                    }
+                });
+        }
+        
+        function startProcess() {
+            if (!inputFile) {
+                showStatus('请先选择Excel文件', 'error');
+                return;
+            }
+            
+            document.getElementById('processBtn').disabled = true;
+            document.getElementById('processBtn').textContent = '处理中...';
+            document.getElementById('progressContainer').classList.add('active');
+            showStatus('正在处理，请保持码上放心客户端打开...', 'info');
+            
+            // 开始处理
+            fetch('/start_process', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    input_file: inputFile,
+                    output_path: outputPath,
+                    client_title: document.getElementById('clientTitle').value
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) {
+                    showStatus(data.error || '启动失败', 'error');
+                    resetUI();
+                } else {
+                    // 开始轮询状态
+                    startStatusCheck();
+                }
+            });
+        }
+        
+        function startStatusCheck() {
+            statusCheckInterval = setInterval(() => {
+                fetch('/get_status')
+                    .then(r => r.json())
+                    .then(data => {
+                        updateProgress(data);
+                        
+                        if (!data.running && data.total > 0) {
+                            // 处理完成
+                            clearInterval(statusCheckInterval);
+                            if (data.message.includes('完成')) {
+                                showStatus(data.message, 'success');
+                            } else if (data.message.includes('错误')) {
+                                showStatus(data.message, 'error');
+                            }
+                            resetUI();
+                        }
+                    });
+            }, 500);
+        }
+        
+        function updateProgress(data) {
+            if (data.total > 0) {
+                const percent = Math.round((data.current / data.total) * 100);
+                document.getElementById('progressFill').style.width = percent + '%';
+                document.getElementById('progressText').textContent = data.message || `正在处理: ${data.current}/${data.total}`;
+            } else {
+                document.getElementById('progressText').textContent = data.message || '准备中...';
+            }
+        }
+        
+        function showStatus(message, type) {
+            const status = document.getElementById('status');
+            status.className = 'status ' + type + ' active';
+            status.textContent = message;
+        }
+        
+        function resetUI() {
+            document.getElementById('processBtn').disabled = false;
+            document.getElementById('processBtn').textContent = '开始处理';
+        }
+    </script>
+</body>
+</html>
