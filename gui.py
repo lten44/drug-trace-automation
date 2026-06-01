@@ -11,7 +11,7 @@ import logging
 import shutil
 
 # 版本号
-VERSION = "v2.0"
+VERSION = "v2.2"
 
 # 自动更新配置
 UPDATE_DIR = r'E:\药品批发企业追朔码自动处理软件'
