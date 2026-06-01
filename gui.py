@@ -14,9 +14,8 @@ import shutil
 VERSION = "v2.2"
 
 # 自动更新配置
-UPDATE_DIR = r'E:\药品批发企业追朔码自动处理软件'
-UPDATE_EXE_NAME = "药品批发企业追朔码自动处理软件.exe"
 VERSION_FILE = "version.json"
+UPDATE_EXE_NAME = "国瑞新特药追朔码自动处理软件.exe"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -51,43 +50,56 @@ def compare_versions(v1, v2):
     return 0
 
 def check_and_update():
-    """检查更新目录，如有新版本则自动更新"""
-    update_dir = UPDATE_DIR
-    version_file = os.path.join(update_dir, VERSION_FILE)
-    new_exe = os.path.join(update_dir, UPDATE_EXE_NAME)
-
-    if not os.path.exists(update_dir):
-        return False  # 更新目录不存在，不更新
-
+    """检查更新：如有新版本则自动更新后重启"""
+    version_file = os.path.join(BASE_DIR, VERSION_FILE)
+    current_exe = sys.executable
+    
+    # 检查版本文件是否存在
     if not os.path.exists(version_file):
-        return False  # 版本文件不存在，不更新
-
-    if not os.path.exists(new_exe):
-        return False  # 新版本exe不存在，不更新
-
+        return False
+    
     try:
         with open(version_file, 'r', encoding='utf-8') as f:
             update_info = json.load(f)
         latest_version = update_info.get('version', '')
-
+        
         if not latest_version:
             return False
-
-        # 比较版本
+        
+        # 比较版本：如果最新版本 > 当前版本
         if compare_versions(latest_version, VERSION) > 0:
-            print(f"发现新版本 {latest_version}，正在更新...")
-            current_exe = sys.executable
-
+            print(f"[更新] 发现新版本 {latest_version}，当前版本 {VERSION}，正在更新...")
+            
             # 复制新exe覆盖当前exe
-            shutil.copy2(new_exe, current_exe)
-            print("更新完成，正在启动新版本...")
-
-            # 启动新版本
-            os.startfile(current_exe)
-            return True  # 需要退出
+            new_exe = os.path.join(BASE_DIR, UPDATE_EXE_NAME)
+            if os.path.exists(new_exe):
+                # 先删除旧的备份文件（如果存在）
+                backup_exe = current_exe + ".old"
+                if os.path.exists(backup_exe):
+                    try:
+                        os.remove(backup_exe)
+                    except:
+                        pass
+                
+                # 先把当前exe重命名为.bak，避免覆盖失败
+                try:
+                    os.rename(current_exe, backup_exe)
+                except:
+                    pass
+                
+                # 复制新exe
+                shutil.copy2(new_exe, current_exe)
+                print("[更新] 更新完成，正在启动新版本...")
+                
+                # 启动新版本后退出
+                os.startfile(current_exe)
+                return True  # 需要退出
+            else:
+                print(f"[更新] 新版本exe不存在: {new_exe}")
+                
     except Exception as e:
-        print(f"检查更新失败: {e}")
-
+        print(f"[更新] 检查更新失败: {e}")
+    
     return False
 
 CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
@@ -226,7 +238,7 @@ def generate_filename(meta, drug_names=None):
         name_str = "药品"
     for ch in r'\/:*?"<>|':
         receiver, name_str, doc_no = receiver.replace(ch,""), name_str.replace(ch,""), doc_no.replace(ch,"")
-    return f"药品批发企业-{receiver}-{name_str}-{doc_no}.xlsx"
+    return f"汕头国瑞新特药-{receiver}-{name_str}-{doc_no}.xlsx"
 
 def write_result_excel(original_data, level_one_map, batch_no_map, output_dir=OUTPUT_FOLDER):
     """新建表格，每行写完整药品信息，删除零头数/生产信息/验证信息列"""
@@ -480,26 +492,82 @@ class CodeQueryUI:
             result["error"] = str(e)
             return result
     
-    def batch_query(self, trace_codes, callback=None):
+    def query_batch_only(self, trace_code):
+        """只查询并获取产品批号（用于已经是1级码的情况），跳过追溯码查询和过滤"""
+        result = {"success": False, "code": trace_code, "level_one_codes": [trace_code], "batch_no": "", "error": ""}
+        try:
+            logger.debug(f"[跳过查询] 直接获取批号: {trace_code}")
+            
+            # 1. 输入追溯码
+            self._type_code(trace_code)
+            time.sleep(0.3)
+            
+            # 2. 点击查询
+            self._click("query_btn")
+            time.sleep(2)
+            
+            # 3. 获取产品批号
+            batch_no = ""
+            batch_pos = self.cal.get("batch_no_pos")
+            if batch_pos:
+                try:
+                    pyautogui.doubleClick(batch_pos['x'], batch_pos['y'])
+                    time.sleep(0.3)
+                    pyautogui.hotkey('ctrl', 'c')
+                    time.sleep(0.3)
+                    batch_no = pyperclip.paste().strip()
+                    logger.debug(f"获取到产品批号: {batch_no}")
+                except Exception as e:
+                    logger.error(f"获取产品批号失败: {str(e)}")
+            
+            result["batch_no"] = batch_no
+            result["success"] = True
+            return result
+            
+        except Exception as e:
+            import traceback
+            logger.error(f"获取批号时出错: {str(e)}")
+            result["error"] = str(e)
+            return result
+
+    def batch_query(self, records, callback=None):
+        """批量查询，码包装数为1的行跳过追溯码查询，直接获取批号"""
         level_one_map = {}
         batch_no_map = {}
-        total = len(trace_codes)
-        for idx, code in enumerate(trace_codes, 1):
-            # 检查停止标志
+        total = len(records)
+        for idx, record in enumerate(records, 1):
             if self.stop_flag.is_set():
                 raise StopIteration("用户停止执行")
             
+            code = record.trace_code
+            is_already_level_one = (record.code_pack_count == "1")
+            
             if callback:
-                callback(idx, total, code, None)
-            result = self.query_single(code)
-            if result["success"]:
-                level_one_map[code] = result["level_one_codes"] if result["level_one_codes"] else [code]
+                if is_already_level_one:
+                    callback(idx, total, code, {"skip": True})
+                else:
+                    callback(idx, total, code, None)
+            
+            if is_already_level_one:
+                # 已经是1级码，直接获取批号
+                result = self.query_batch_only(code)
+                level_one_map[code] = [code]
                 if result.get("batch_no"):
                     batch_no_map[code] = result["batch_no"]
+                if callback:
+                    callback(idx, total, code, result)
             else:
-                level_one_map[code] = [code]
-            if callback:
-                callback(idx, total, code, result)
+                # 需要查询并过滤1级码
+                result = self.query_single(code)
+                if result["success"]:
+                    level_one_map[code] = result["level_one_codes"] if result["level_one_codes"] else [code]
+                    if result.get("batch_no"):
+                        batch_no_map[code] = result["batch_no"]
+                else:
+                    level_one_map[code] = [code]
+                if callback:
+                    callback(idx, total, code, result)
+        
         return level_one_map, batch_no_map
 
 # ============================================================
@@ -664,7 +732,7 @@ class DrugTraceApp:
         # ===== 标题区域 =====
         title_frame = tk.Frame(self.root, bg=PRIMARY, pady=18)
         title_frame.pack(fill=tk.X)
-        tk.Label(title_frame, text=f"💊 药品批发企业追朔码自动处理软件 {VERSION}",
+        tk.Label(title_frame, text=f"💊 国瑞新特药追朔码自动处理软件 {VERSION}",
                 font=("Microsoft YaHei", 20, "bold"), bg=PRIMARY, fg="white").pack()
         tk.Label(title_frame, text="自动查询追溯码关联关系，生成1级码表格",
                 font=("Microsoft YaHei", 10), bg=PRIMARY, fg="#d0d8ff").pack(pady=(4, 0))
@@ -894,9 +962,9 @@ class DrugTraceApp:
                 self.root.after(0, lambda: self.status_var.set("错误：未找到追溯码记录"))
                 return
             
-            trace_codes = [r.trace_code for r in data.records]
-            total = len(trace_codes)
-            self.root.after(0, lambda: self.status_var.set(f"共{total}条追溯码，开始查询..."))
+            total = len(data.records)
+            skip_count = sum(1 for r in data.records if r.code_pack_count == "1")
+            self.root.after(0, lambda: self.status_var.set(f"共{total}条追溯码（{skip_count}条已是1级码，跳过查询），开始处理..."))
             self.root.after(0, lambda: self.progress_var.set(10))
             
             ui = CodeQueryUI(self.calibrator, self.stop_flag)
@@ -905,7 +973,9 @@ class DrugTraceApp:
                 pct = 10 + (idx / t) * 80
                 self.root.after(0, lambda p=pct: self.progress_var.set(p))
                 if result:
-                    if result.get('success'):
+                    if result.get('skip'):
+                        self.root.after(0, lambda i=idx, tt=t: self.status_var.set(f"正在处理: {i}/{tt} - 跳过（已是1级码）"))
+                    elif result.get('success'):
                         n = len(result.get('level_one_codes', []))
                         self.root.after(0, lambda i=idx, tt=t, nn=n: self.status_var.set(f"正在处理: {i}/{tt} - 获取{nn}个1级码"))
                     else:
@@ -913,7 +983,7 @@ class DrugTraceApp:
                 else:
                     self.root.after(0, lambda i=idx, tt=t: self.status_var.set(f"正在处理: {i}/{tt}"))
             
-            level_one_map, batch_no_map = ui.batch_query(trace_codes, callback=on_progress)
+            level_one_map, batch_no_map = ui.batch_query(data.records, callback=on_progress)
             
             self.root.after(0, lambda: self.status_var.set("正在生成Excel文件..."))
             self.root.after(0, lambda: self.progress_var.set(95))
