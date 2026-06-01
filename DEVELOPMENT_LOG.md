@@ -1,4 +1,4 @@
-# 国瑞新特药追朔码自动处理软件 - 开发历程
+# 药品批发企业追朔码自动处理软件 - 开发历程
 
 > 一个用于自动化处理药品追溯码的桌面应用程序，通过模拟鼠标操作与"码上放心"客户端交互，实现追溯码的自动查询和1级码提取。
 
@@ -91,7 +91,7 @@ batch_no = pyperclip.paste().strip()
 - 渐变色标题栏
 - 图标标识（💊🔧📂⚙️💡）
 - 默认路径设置功能（可修改默认输入/输出目录）
-- 文件名前缀统一加"汕头国瑞新特药"
+- 文件名前缀统一加"药品批发企业"
 
 ---
 
@@ -116,7 +116,7 @@ batch_no = pyperclip.paste().strip()
 
 ### v1.8 - 自动更新功能
 **新增功能**：
-- 启动时自动检查 `E:\国瑞新特药追朔码自动处理软件\` 目录
+- 启动时自动检查 `E:\药品批发企业追朔码自动处理软件\` 目录
 - 发现新版本自动复制覆盖并重启
 - 版本号比较逻辑（支持 v1.9 < v1.10 < v2.0 等）
 
@@ -195,10 +195,10 @@ drug_trace_app/
 ├── config.json         # 用户配置（默认路径等）
 ├── debug.log           # 运行日志
 └── dist/
-    └── 国瑞新特药追朔码自动处理软件.exe
+    └── 药品批发企业追朔码自动处理软件.exe
 
-更新目录（E:\国瑞新特药追朔码自动处理软件\）:
-├── 国瑞新特药追朔码自动处理软件.exe
+更新目录（E:\药品批发企业追朔码自动处理软件\）:
+├── 药品批发企业追朔码自动处理软件.exe
 └── version.json        # 版本信息
 ```
 
@@ -263,9 +263,9 @@ def filter_level_one(raw_text):
 
 ```python
 def check_and_update():
-    update_dir = r'E:\国瑞新特药追朔码自动处理软件'
+    update_dir = r'E:\药品批发企业追朔码自动处理软件'
     version_file = os.path.join(update_dir, "version.json")
-    new_exe = os.path.join(update_dir, "国瑞新特药追朔码自动处理软件.exe")
+    new_exe = os.path.join(update_dir, "药品批发企业追朔码自动处理软件.exe")
     
     # 读取最新版本号
     with open(version_file, 'r') as f:
