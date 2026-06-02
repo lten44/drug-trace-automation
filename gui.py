@@ -779,6 +779,32 @@ class DrugTraceApp:
             self.calib_status.config(text="❌ 未校准，请先校准", fg="#ff4d4f")
             self.start_btn.config(state=tk.DISABLED)
     
+    def _start_emergency_stop(self):
+        """后台监听 F1+F1 紧急停止（全局有效，无需焦点）"""
+        VK_F1 = 0x70
+        last_press = [0]  # 用列表避免闭包问题
+        
+        def monitor():
+            import ctypes
+            while True:
+                if ctypes.windll.user32.GetAsyncKeyState(VK_F1) & 0x8000:
+                    now = time.time()
+                    if now - last_press[0] < 1.0:
+                        # 两次 F1 间隔小于 1 秒，触发急停
+                        self.stop_flag.set()
+                        self.root.after(0, lambda: self.status_var.set("⚠️ 已紧急停止！"))
+                        self.root.after(0, lambda: messagebox.showwarning("紧急停止", 
+                            "已检测到 F1+F1 紧急停止指令，操作已中断。"))
+                        last_press[0] = 0
+                        time.sleep(1)  # 防重复触发
+                    else:
+                        last_press[0] = now
+                    time.sleep(0.3)  # 消抖
+                time.sleep(0.05)
+        
+        t = threading.Thread(target=monitor, daemon=True)
+        t.start()
+    
     def _create_widgets(self):
         # 配色方案
         BG_COLOR = "#f5f7fa"
