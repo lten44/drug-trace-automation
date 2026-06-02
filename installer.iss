@@ -3,7 +3,7 @@
 ;   pyinstaller --onedir --name "药品批发企业追朔码自动处理软件" gui.py
 
 #define MyAppName "药品批发企业追朔码自动处理软件"
-#define MyAppVersion "v2.3.1"
+#define MyAppVersion "v2.3.2"
 #define MyAppPublisher "药品批发企业"
 #define MyAppURL ""
 #define MyAppExeName "药品批发企业追朔码自动处理软件.exe"

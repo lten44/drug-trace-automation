@@ -408,6 +408,7 @@ class CodeQueryUI:
     
     def __init__(self, calibrator, stop_flag=None):
         self.cal = calibrator
+        self._pc = pyperclip
         self.stop_flag = stop_flag if stop_flag else threading.Event()
         if not self.cal.is_calibrated():
             raise RuntimeError("请先完成校准！点击'校准位置'按钮")
@@ -1045,44 +1046,39 @@ class DrugTraceApp:
         self.config['unit_name'] = unit_name
         self._save_config()
         
-        # 极速模式检测（先读Excel快速判断码包装数）
-        try:
-            import openpyxl
-            wb = openpyxl.load_workbook(self.input_file, data_only=True)
-            ws = wb.active
-            pack_counts = set()
-            for row_idx in range(7, ws.max_row + 1):
-                val = ws.cell(row=row_idx, column=8).value  # H列=码包装数
-                pack_counts.add(str(val).strip() if val else "")
-            wb.close()
-            all_pack_one = pack_counts == {"1"} or pack_counts == {"1", ""}
-        except:
-            all_pack_one = False
+        # 极速模式检测 + 统计行数（一次读取Excel完成）
+        import openpyxl
+        wb = openpyxl.load_workbook(self.input_file, data_only=True)
+        ws = wb.active
+        pack_counts = set()
+        total_rows = 0
+        for row_idx in range(7, ws.max_row + 1):
+            val = ws.cell(row=row_idx, column=1).value
+            if not val:
+                continue
+            total_rows += 1
+            pack_val = ws.cell(row=row_idx, column=8).value  # H列=码包装数
+            pack_counts.add(str(pack_val).strip() if pack_val else "")
+        wb.close()
+        all_pack_one = pack_counts == {"1"} or pack_counts == {"1", ""}
         
-        # 自动勾选/提示
-        is_all_level_one = self.all_level_one_var.get() or all_pack_one
+        # 自动勾选全是1级码
         if all_pack_one and not self.all_level_one_var.get():
             self.all_level_one_var.set(True)
             self.status_var.set("检测到全部码包装数为1，已自动勾选「全是1级码」")
         
-        # 统计行数
-        import openpyxl
-        wb = openpyxl.load_workbook(self.input_file, data_only=True)
-        ws = wb.active
-        total_rows = sum(1 for row in range(7, ws.max_row + 1) if ws.cell(row=row, column=1).value)
-        wb.close()
-        
         # 显示警告对话框
+        is_all_level_one = self.all_level_one_var.get() or all_pack_one
         if not self._show_warning_dialog(total_rows, is_all_level_one):
             self.status_var.set("操作已取消")
             return
         
         self.stop_flag.clear()
         self.is_running = True
-        self.is_all_level_one = self.all_level_one_var.get()  # 保存到实例变量供_process_file使用
+        self.is_all_level_one = self.all_level_one_var.get()
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
-        self.status_var.set("正在启动，5秒后开始处理...（不要移动鼠标键盘）")
+        self.status_var.set("正在启动...（不要移动鼠标键盘）")
         Thread(target=self._process_file, daemon=True).start()
     
     def _process_file(self):
@@ -1156,24 +1152,38 @@ class DrugTraceApp:
                 else:
                     self.root.after(0, lambda i=idx, tt=t: self.status_var.set(f"正在处理: {i}/{tt}"))
             
-            # 4. 执行处理
-            if self.is_all_level_one:
-                # 极速模式：所有行都是1级码，只查询第一行获取批号
-                self.root.after(0, lambda: self.status_var.set("极速模式：所有追溯码已是1级码，仅查询一次获取批号..."))
-                first_record = data.records[0]
-                result = ui.query_batch_only(first_record.trace_code)
+            # 4. 执行处理（全1级模式 vs 混装模式）
+            level_one_map = {}
+            batch_no_map = {}
+            
+            # 进度恢复：先填已处理的行
+            if processed_indices:
+                for idx in processed_indices:
+                    if idx < len(data.records):
+                        r = data.records[idx]
+                        level_one_map[r.trace_code] = [r.trace_code]
+                        batch_no_map[r.trace_code] = r.batch_no
+            
+            # 过滤出未处理的行
+            unprocessed = [r for i, r in enumerate(data.records) if i not in processed_indices]
+            
+            if not unprocessed:
+                self.root.after(0, lambda: self.status_var.set("所有记录已处理完毕"))
+                self.root.after(0, lambda: self.progress_var.set(90))
+            elif self.is_all_level_one:
+                # 全1级模式：只查第一行的批号，复用给所有行
+                self.root.after(0, lambda: self.status_var.set("全1级模式：查询第一行获取批号..."))
+                first_code = unprocessed[0].trace_code
+                result = ui.query_batch_only(first_code)
                 batch_no = result.get("batch_no", "")
-                
-                level_one_map = {}
-                batch_no_map = {}
-                for record in data.records:
+                for record in unprocessed:
                     level_one_map[record.trace_code] = [record.trace_code]
                     if batch_no:
                         batch_no_map[record.trace_code] = batch_no
-                
                 self.root.after(0, lambda: self.progress_var.set(90))
             else:
-                level_one_map, batch_no_map = ui.batch_query(data.records, callback=on_progress)
+                # 混装模式：两轮查询
+                level_one_map, batch_no_map = ui.batch_query(unprocessed, callback=on_progress)
             
             # 5. 生成Excel
             self.root.after(0, lambda: self.status_var.set("正在生成Excel文件..."))
