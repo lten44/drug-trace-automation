@@ -23,6 +23,7 @@ wheels/
 # PyInstaller
 *.manifest
 *.spec
+!build.spec
 
 # 自动生成的配置文件（用户本地数据）
 calibration.json

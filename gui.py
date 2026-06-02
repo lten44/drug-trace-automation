@@ -11,7 +11,7 @@ import logging
 import shutil
 
 # 版本号
-VERSION = "v2.2"
+VERSION = "v2.3"
 
 # 自动更新配置
 VERSION_FILE = "version.json"
@@ -19,8 +19,12 @@ UPDATE_EXE_NAME = "药品批发企业追朔码自动处理软件.exe"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
+    # 安装模式下可写文件重定向到 %APPDATA%
+    DATA_DIR = os.path.join(os.environ.get('APPDATA', os.path.expanduser("~")), "药品批发企业追朔码自动处理软件")
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    DATA_DIR = BASE_DIR
+os.makedirs(DATA_DIR, exist_ok=True)
 
 def compare_versions(v1, v2):
     """比较两个版本号，返回1表示v1>v2，-1表示v1<v2，0表示相等"""
@@ -102,8 +106,8 @@ def check_and_update():
     
     return False
 
-CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
-LOG_FILE = os.path.join(BASE_DIR, 'debug.log')
+CONFIG_FILE = os.path.join(DATA_DIR, 'config.json')
+LOG_FILE = os.path.join(DATA_DIR, 'debug.log')
 OUTPUT_FOLDER = r'E:\desktop\各大医院追溯码'
 DEFAULT_INPUT_PATH = r'E:\desktop\各大医院追溯码'
 # 如果输出目录不存在，回退到桌面
@@ -158,21 +162,15 @@ class ExcelData:
     records: list = field(default_factory=list)
 
 # ============================================================
-# Excel 读写
+# Excel 读写（openpyxl 延迟加载，加速启动）
 # ============================================================
-import openpyxl
-from openpyxl.styles import Font, Alignment, Border, Side
-
-THIN_BORDER = Border(
-    left=Side(style="thin"), right=Side(style="thin"),
-    top=Side(style="thin"), bottom=Side(style="thin"),
-)
 
 def _safe_str(val) -> str:
     if val is None: return ""
     return str(val).strip()
 
 def read_sales_excel(file_path: str) -> ExcelData:
+    import openpyxl
     wb = openpyxl.load_workbook(file_path, data_only=True)
     ws = wb.active
     data = ExcelData()
@@ -221,8 +219,8 @@ def read_sales_excel(file_path: str) -> ExcelData:
     wb.close()
     return data
 
-def generate_filename(meta, drug_names=None):
-    """生成文件名：收货单位-药品名(去重&连接)-单据号"""
+def generate_filename(meta, drug_names=None, unit_name="药品批发企业"):
+    """生成文件名：单位名称-收货单位-药品名(去重&连接)-单据号"""
     receiver = meta.receiver_name or "未知单位"
     doc_no = meta.doc_no or "未知单据号"
     if drug_names:
@@ -238,10 +236,13 @@ def generate_filename(meta, drug_names=None):
         name_str = "药品"
     for ch in r'\/:*?"<>|':
         receiver, name_str, doc_no = receiver.replace(ch,""), name_str.replace(ch,""), doc_no.replace(ch,"")
-    return f"药品批发企业-{receiver}-{name_str}-{doc_no}.xlsx"
+    return f"{unit_name}-{receiver}-{name_str}-{doc_no}.xlsx"
 
-def write_result_excel(original_data, level_one_map, batch_no_map, output_dir=OUTPUT_FOLDER):
+def write_result_excel(original_data, level_one_map, batch_no_map, output_dir, unit_name="药品批发企业"):
     """新建表格，每行写完整药品信息，删除零头数/生产信息/验证信息列"""
+    import openpyxl
+    from openpyxl.styles import Font, Alignment
+    
     os.makedirs(output_dir, exist_ok=True)
     
     # 收集所有不重复的药品名（用于文件名）
@@ -252,7 +253,7 @@ def write_result_excel(original_data, level_one_map, batch_no_map, output_dir=OU
             seen_names.add(record.drug_name)
             all_drug_names.append(record.drug_name)
     
-    output_path = os.path.join(output_dir, generate_filename(original_data.meta, all_drug_names))
+    output_path = os.path.join(output_dir, generate_filename(original_data.meta, all_drug_names, unit_name))
     
     # 新的表头：删除零头数(9)、生产信息(10)、验证信息(12)
     new_headers = [
@@ -373,6 +374,7 @@ import pyperclip
 pyautogui.PAUSE = 0.3
 pyautogui.FAILSAFE = True
 
+
 class ScreenCalibrator:
     """屏幕坐标校准器"""
     
@@ -425,116 +427,123 @@ class CodeQueryUI:
         pyautogui.hotkey('ctrl', 'a')
         time.sleep(0.1)
         # 用剪贴板粘贴（避免输入法问题）
-        pyperclip.copy(code)
+        self._pc.copy(code)
         pyautogui.hotkey('ctrl', 'v')
         time.sleep(0.3)
     
     def query_single(self, trace_code):
+        """查询追溯码，获取1级码列表和产品批号（带重试机制）"""
         result = {"success": False, "code": trace_code, "level_one_codes": [], "batch_no": "", "error": ""}
-        try:
-            logger.debug(f"开始处理追溯码: {trace_code}")
-            
-            # 1. 输入追溯码
-            logger.debug(f"步骤1: 输入追溯码")
-            self._type_code(trace_code)
-            time.sleep(0.3)
-            
-            # 2. 点击查询
-            logger.debug(f"步骤2: 点击查询按钮")
-            self._click("query_btn")
-            time.sleep(2)  # 等待查询结果
-            
-            # 3. 点击一键复制所有码（查询后的位置）
-            logger.debug(f"步骤3: 点击复制按钮（查询后位置）")
-            self._click("copy_btn_after")
-            time.sleep(0.5)
-            
-            # 4. 读取剪贴板（追溯码）
-            logger.debug(f"步骤4: 读取剪贴板")
-            raw_text = pyperclip.paste()
-            logger.debug(f"剪贴板内容长度: {len(raw_text) if raw_text else 0}")
-            if not raw_text or not raw_text.strip():
-                result["error"] = "复制结果为空"
-                logger.debug(f"复制结果为空")
+        
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.debug(f"开始处理追溯码: {trace_code} (第{attempt}次尝试)")
+                self._type_code(trace_code)
+                time.sleep(0.3)
+                self._click("query_btn")
+                time.sleep(2)
+                self._click("copy_btn_after")
+                time.sleep(0.5)
+                
+                # 剪贴板检查 + 重试
+                raw_text = self._pc.paste()
+                if not raw_text or not raw_text.strip():
+                    if attempt < max_retries:
+                        logger.debug(f"复制结果为空，重试 ({attempt}/{max_retries})")
+                        time.sleep(1)
+                        continue
+                    result["error"] = f"重试{max_retries}次后复制结果仍为空"
+                    logger.debug(result["error"])
+                    return result
+                
+                level_one = filter_level_one(raw_text)
+                result["level_one_codes"] = level_one
+                
+                # 批号获取（内部重试2次）
+                batch_no = ""
+                batch_pos = self.cal.get("batch_no_pos")
+                if batch_pos:
+                    for _ in range(2):
+                        try:
+                            pyautogui.doubleClick(batch_pos['x'], batch_pos['y'])
+                            time.sleep(0.3)
+                            pyautogui.hotkey('ctrl', 'c')
+                            time.sleep(0.3)
+                            batch_no = self._pc.paste().strip()
+                            if batch_no:
+                                break
+                        except:
+                            pass
+                result["batch_no"] = batch_no
+                result["success"] = True
+                logger.debug(f"完成，{len(level_one)}个1级码，批号: {batch_no}")
                 return result
-            
-            # 5. 过滤1级码
-            logger.debug(f"步骤5: 过滤1级码")
-            level_one = filter_level_one(raw_text)
-            result["level_one_codes"] = level_one
-            
-            # 6. 获取产品批号：点击批号位置，选中并复制
-            logger.debug(f"步骤6: 获取产品批号")
-            batch_no = ""
-            batch_pos = self.cal.get("batch_no_pos")
-            if batch_pos:
-                try:
-                    # 双击批号位置选中文字
-                    pyautogui.doubleClick(batch_pos['x'], batch_pos['y'])
-                    time.sleep(0.3)
-                    # 复制选中的文字
-                    pyautogui.hotkey('ctrl', 'c')
-                    time.sleep(0.3)
-                    batch_no = pyperclip.paste().strip()
-                    logger.debug(f"获取到产品批号: {batch_no}")
-                except Exception as e:
-                    logger.error(f"获取产品批号失败: {str(e)}")
-                    batch_no = ""
-            result["batch_no"] = batch_no
-            result["success"] = True
-            logger.debug(f"处理完成，找到 {len(level_one)} 个1级码，批号: {batch_no}")
-            return result
-            
-        except Exception as e:
-            import traceback
-            logger.error(f"处理追溯码 {trace_code} 时出错: {str(e)}")
-            logger.error(traceback.format_exc())
-            result["error"] = str(e)
-            return result
+                
+            except Exception as e:
+                logger.error(f"处理追溯码 {trace_code} (第{attempt}次) 出错: {str(e)}")
+                if attempt < max_retries:
+                    time.sleep(1)
+                    continue
+                result["error"] = str(e)
+                return result
+        
+        return result
     
     def query_batch_only(self, trace_code):
-        """只查询并获取产品批号（用于已经是1级码的情况），跳过追溯码查询和过滤"""
+        """只查询并获取产品批号（用于已经是1级码的情况），带重试机制"""
         result = {"success": False, "code": trace_code, "level_one_codes": [trace_code], "batch_no": "", "error": ""}
-        try:
-            logger.debug(f"[跳过查询] 直接获取批号: {trace_code}")
-            
-            # 1. 输入追溯码
-            self._type_code(trace_code)
-            time.sleep(0.3)
-            
-            # 2. 点击查询
-            self._click("query_btn")
-            time.sleep(2)
-            
-            # 3. 获取产品批号
-            batch_no = ""
-            batch_pos = self.cal.get("batch_no_pos")
-            if batch_pos:
-                try:
-                    pyautogui.doubleClick(batch_pos['x'], batch_pos['y'])
-                    time.sleep(0.3)
-                    pyautogui.hotkey('ctrl', 'c')
-                    time.sleep(0.3)
-                    batch_no = pyperclip.paste().strip()
-                    logger.debug(f"获取到产品批号: {batch_no}")
-                except Exception as e:
-                    logger.error(f"获取产品批号失败: {str(e)}")
-            
-            result["batch_no"] = batch_no
-            result["success"] = True
-            return result
-            
-        except Exception as e:
-            import traceback
-            logger.error(f"获取批号时出错: {str(e)}")
-            result["error"] = str(e)
-            return result
+        
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.debug(f"[批号查询] {trace_code} (第{attempt}次)")
+                self._type_code(trace_code)
+                time.sleep(0.3)
+                self._click("query_btn")
+                time.sleep(2)
+                
+                batch_no = ""
+                batch_pos = self.cal.get("batch_no_pos")
+                if batch_pos:
+                    for _ in range(2):
+                        try:
+                            pyautogui.doubleClick(batch_pos['x'], batch_pos['y'])
+                            time.sleep(0.3)
+                            pyautogui.hotkey('ctrl', 'c')
+                            time.sleep(0.3)
+                            batch_no = self._pc.paste().strip()
+                            if batch_no:
+                                break
+                        except:
+                            pass
+                
+                if not batch_no and attempt < max_retries:
+                    logger.debug(f"批号为空，重试 ({attempt}/{max_retries})")
+                    time.sleep(1)
+                    continue
+                
+                result["batch_no"] = batch_no
+                result["success"] = True
+                logger.debug(f"批号: {batch_no or '（空）'}")
+                return result
+                
+            except Exception as e:
+                logger.error(f"获取批号出错 (第{attempt}次): {str(e)}")
+                if attempt < max_retries:
+                    time.sleep(1)
+                    continue
+                result["error"] = str(e)
+                return result
+        
+        return result
 
     def batch_query(self, records, callback=None):
         """批量查询，码包装数为1的行跳过追溯码查询，直接获取批号"""
         level_one_map = {}
         batch_no_map = {}
         total = len(records)
+        
         for idx, record in enumerate(records, 1):
             if self.stop_flag.is_set():
                 raise StopIteration("用户停止执行")
@@ -549,7 +558,6 @@ class CodeQueryUI:
                     callback(idx, total, code, None)
             
             if is_already_level_one:
-                # 已经是1级码，直接获取批号
                 result = self.query_batch_only(code)
                 level_one_map[code] = [code]
                 if result.get("batch_no"):
@@ -557,7 +565,6 @@ class CodeQueryUI:
                 if callback:
                     callback(idx, total, code, result)
             else:
-                # 需要查询并过滤1级码
                 result = self.query_single(code)
                 if result["success"]:
                     level_one_map[code] = result["level_one_codes"] if result["level_one_codes"] else [code]
@@ -573,7 +580,6 @@ class CodeQueryUI:
 # ============================================================
 # 校准窗口
 # ============================================================
-import threading
 
 class CalibrateWindow:
     """校准窗口 - 实时显示鼠标位置，用户按F5记录"""
@@ -597,7 +603,7 @@ class CalibrateWindow:
         self.win.geometry("500x280")
         self.win.resizable(False, False)
         self.win.transient(parent)
-        self.win.grab_set()
+        # 不设置 grab_set()，允许用户自由切换窗口操作码上放心
         self.win.attributes('-topmost', True)  # 置顶
         
         # 绑定F5热键
@@ -643,11 +649,12 @@ class CalibrateWindow:
             try:
                 x, y = pyautogui.position()
                 self.current_x, self.current_y = x, y
-                self.win.after(0, lambda: self.coord_label.config(
-                    text=f"当前鼠标位置: ({x}, {y})"))
+                # 用默认参数固定闭包值，避免lambda引用变量
+                self.win.after(0, lambda px=x, py=y: self.coord_label.config(
+                    text=f"当前鼠标位置: ({px}, {py})"))
             except:
                 pass
-            time.sleep(0.05)
+            time.sleep(0.1)  # 降低频率，减少事件队列压力
     
     def _show_step(self):
         if self.current_step >= len(self.steps):
@@ -666,7 +673,7 @@ class CalibrateWindow:
         self.cal.set(name, x, y)
         self.pos_label.config(text=f"已记录: ({x}, {y}) ✓")
         self.current_step += 1
-        time.sleep(0.3)
+        self.win.update()  # 刷新界面
         self._show_step()
     
     def _test_click(self):
@@ -688,7 +695,7 @@ class DrugTraceApp:
         self.root.resizable(False, False)
         
         self.config = self._load_config()
-        self.calibrator = ScreenCalibrator(os.path.join(BASE_DIR, 'calibration.json'))
+        self.calibrator = ScreenCalibrator(os.path.join(DATA_DIR, 'calibration.json'))
         self.input_file = ""
         self.is_running = False
         self.stop_flag = threading.Event()
@@ -729,11 +736,16 @@ class DrugTraceApp:
 
         self.root.configure(bg=BG_COLOR)
 
-        # ===== 标题区域 =====
-        title_frame = tk.Frame(self.root, bg=PRIMARY, pady=18)
+        # ===== 标题区域（v2.3 新配色）=====
+        title_frame = tk.Frame(self.root, bg=PRIMARY, pady=16)
         title_frame.pack(fill=tk.X)
-        tk.Label(title_frame, text=f"💊 药品批发企业追朔码自动处理软件 {VERSION}",
-                font=("Microsoft YaHei", 20, "bold"), bg=PRIMARY, fg="white").pack()
+
+        title_inner = tk.Frame(title_frame, bg=PRIMARY)
+        title_inner.pack()
+        tk.Label(title_inner, text=f"💊 药品批发企业追朔码自动处理软件",
+                font=("Microsoft YaHei", 18, "bold"), bg=PRIMARY, fg="white").pack(side=tk.LEFT)
+        tk.Label(title_inner, text=f"  {VERSION}", font=("Microsoft YaHei", 12, "bold"),
+                bg="#ff6b35", fg="white", padx=8, pady=2).pack(side=tk.LEFT, padx=(8, 0))
         tk.Label(title_frame, text="自动查询追溯码关联关系，生成1级码表格",
                 font=("Microsoft YaHei", 10), bg=PRIMARY, fg="#d0d8ff").pack(pady=(4, 0))
 
@@ -830,6 +842,42 @@ class DrugTraceApp:
                  bg=PRIMARY, fg="white", activebackground=PRIMARY_HOVER,
                  cursor="hand2").pack(side=tk.RIGHT)
 
+        # ===== 卡片4：单位设置 + 极速模式 =====
+        card4 = tk.Frame(main_frame, bg=CARD_BG, highlightbackground=BORDER_COLOR,
+                         highlightthickness=1, padx=15, pady=12)
+        card4.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(card4, text="🏢 单位名称", font=("Microsoft YaHei", 11, "bold"),
+                bg=CARD_BG, fg=TEXT_PRIMARY).pack(anchor="w")
+
+        unit_frame = tk.Frame(card4, bg=CARD_BG)
+        unit_frame.pack(fill=tk.X, pady=(4, 8))
+        tk.Label(unit_frame, text="单位:", font=("Microsoft YaHei", 9),
+                bg=CARD_BG, fg=TEXT_SECONDARY, width=5, anchor="w").pack(side=tk.LEFT)
+        self.unit_name_var = tk.StringVar(value=self.config.get('unit_name', '药品批发企业'))
+        tk.Entry(unit_frame, textvariable=self.unit_name_var,
+                font=("Microsoft YaHei", 10), relief=tk.SOLID, bd=1,
+                bg="#f9f9f9").pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3)
+        tk.Label(unit_frame, text="  💡 生成文件自动加此前缀",
+                font=("Microsoft YaHei", 9), bg=CARD_BG, fg="#aaa").pack(side=tk.LEFT)
+
+        # 分隔线
+        ttk.Separator(card4, orient='horizontal').pack(fill=tk.X, pady=4)
+
+        # 极速模式选项
+        mode_frame = tk.Frame(card4, bg=CARD_BG)
+        mode_frame.pack(fill=tk.X, pady=(4, 0))
+
+        self.all_level_one_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(mode_frame, text="全是 1 级码（零散药品）",
+                      variable=self.all_level_one_var,
+                      font=("Microsoft YaHei", 10, "bold"),
+                      bg=CARD_BG, fg="#389e0d",
+                      selectcolor=CARD_BG,
+                      activebackground=CARD_BG).pack(anchor="w")
+        tk.Label(mode_frame, text="    勾选后跳过拆码流程，直接查询批号，缩短处理时间",
+                font=("Microsoft YaHei", 9), bg=CARD_BG, fg="#bbb").pack(anchor="w")
+
         # ===== 操作按钮 =====
         btn_frame = tk.Frame(main_frame, bg=BG_COLOR)
         btn_frame.pack(fill=tk.X, pady=12)
@@ -858,15 +906,17 @@ class DrugTraceApp:
         tk.Label(main_frame, textvariable=self.status_var, font=("Microsoft YaHei", 9),
                 fg=TEXT_SECONDARY, bg=BG_COLOR).pack(fill=tk.X)
 
-        # ===== 使用提示 =====
+        # ===== 使用提示 (v2.3) =====
         hint_frame = tk.Frame(main_frame, bg="#f6ffed", highlightbackground="#b7eb8f",
                               highlightthickness=1)
         hint_frame.pack(fill=tk.X, pady=(8, 0))
         tk.Label(hint_frame,
-                text="💡 使用步骤：\n"
+                text="💡 使用步骤（v2.3）：\n"
                      "  1. 点击「校准位置」，依次点击：输入框 → 查询按钮 → 复制按钮 → 产品批号位置\n"
-                     "  2. 选择Excel文件（或设置默认路径）\n"
-                     "  3. 点击「开始处理」（处理中可点击「停止」中断）",
+                     "  2. 设置「单位名称」（默认：药品批发企业）\n"
+                     "  3. 选择Excel文件（或设置默认路径）\n"
+                     "  4. 如全是零散药品，勾选「全是1级码」可跳过拆码流程\n"
+                     "  5. 点击「开始处理」（处理中请勿移动鼠标键盘）",
                 font=("Microsoft YaHei", 9), bg="#f6ffed", fg="#555", justify=tk.LEFT,
                 padx=10, pady=8).pack()
     
@@ -925,6 +975,61 @@ class DrugTraceApp:
             self.stop_flag.set()
             self.status_var.set("正在停止...")
     
+    def _show_warning_dialog(self, total, all_level_one):
+        """显示操作前警告对话框"""
+        win = tk.Toplevel(self.root)
+        win.title("⚠️  操作确认")
+        win.geometry("500x320")
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+        win.attributes('-topmost', True)
+        
+        # 红底标题
+        title_frame = tk.Frame(win, bg="#cf1322", pady=18)
+        title_frame.pack(fill=tk.X)
+        tk.Label(title_frame, text="⚠️  电脑即将自动进行操作",
+                font=("Microsoft YaHei", 16, "bold"), bg="#cf1322", fg="white").pack()
+        
+        body_frame = tk.Frame(win, padx=30, pady=16)
+        body_frame.pack(fill=tk.BOTH, expand=True)
+        
+        warning_lines = [
+            f"当前模式: {'全 1 级模式（零散药品）' if all_level_one else '混装模式（含非1级码）'}",
+            f"待处理: {total} 条追溯码",
+            "",
+            "请确保码上放心客户端已打开并处于登录状态！",
+            "操作期间请不要移动鼠标或敲击键盘！",
+            "否则可能导致操作失败或数据错误！",
+        ]
+        for line in warning_lines:
+            fg_color = "#cf1322" if "不要" in line or "确保" in line else "#333"
+            tk.Label(body_frame, text=line, font=("Microsoft YaHei", 10, "bold" if fg_color=="#cf1322" else "normal"),
+                    fg=fg_color).pack(anchor="w", pady=1)
+        
+        # 按钮
+        btn_frame = tk.Frame(win, pady=10)
+        btn_frame.pack(fill=tk.X)
+        
+        result_flag = {"confirmed": False}
+        
+        def on_confirm():
+            result_flag["confirmed"] = True
+            win.destroy()
+        
+        def on_cancel():
+            win.destroy()
+        
+        tk.Button(btn_frame, text="确 定", command=on_confirm,
+                 font=("Microsoft YaHei", 12, "bold"), bg="#cf1322", fg="white",
+                 width=10, height=1, relief=tk.FLAT, cursor="hand2").pack(side=tk.LEFT, padx=(0, 10))
+        tk.Button(btn_frame, text="取 消", command=on_cancel,
+                 font=("Microsoft YaHei", 12), bg="#e8e8e8", fg="#333",
+                 width=10, height=1, relief=tk.FLAT, cursor="hand2").pack(side=tk.RIGHT)
+        
+        self.root.wait_window(win)
+        return result_flag["confirmed"]
+    
     def _start_process(self):
         if not self.calibrator.is_calibrated():
             messagebox.showerror("错误", "请先完成按钮位置校准")
@@ -934,26 +1039,75 @@ class DrugTraceApp:
             return
         if self.is_running:
             return
-        self.stop_flag.clear()  # 重置停止标志
+        
+        # 保存单位名称到配置
+        unit_name = self.unit_name_var.get().strip() or "药品批发企业"
+        self.config['unit_name'] = unit_name
+        self._save_config()
+        
+        # 极速模式检测（先读Excel快速判断码包装数）
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(self.input_file, data_only=True)
+            ws = wb.active
+            pack_counts = set()
+            for row_idx in range(7, ws.max_row + 1):
+                val = ws.cell(row=row_idx, column=8).value  # H列=码包装数
+                pack_counts.add(str(val).strip() if val else "")
+            wb.close()
+            all_pack_one = pack_counts == {"1"} or pack_counts == {"1", ""}
+        except:
+            all_pack_one = False
+        
+        # 自动勾选/提示
+        is_all_level_one = self.all_level_one_var.get() or all_pack_one
+        if all_pack_one and not self.all_level_one_var.get():
+            self.all_level_one_var.set(True)
+            self.status_var.set("检测到全部码包装数为1，已自动勾选「全是1级码」")
+        
+        # 统计行数
+        import openpyxl
+        wb = openpyxl.load_workbook(self.input_file, data_only=True)
+        ws = wb.active
+        total_rows = sum(1 for row in range(7, ws.max_row + 1) if ws.cell(row=row, column=1).value)
+        wb.close()
+        
+        # 显示警告对话框
+        if not self._show_warning_dialog(total_rows, is_all_level_one):
+            self.status_var.set("操作已取消")
+            return
+        
+        self.stop_flag.clear()
         self.is_running = True
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
-        self.status_var.set("正在启动，5秒后开始处理...")
+        self.status_var.set("正在启动，5秒后开始处理...（不要移动鼠标键盘）")
+        self.stop_flag.clear()
+        self.is_running = True
+        self.is_all_level_one = self.all_level_one_var.get()  # 保存到实例变量供_process_file使用
+        self.start_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+        self.status_var.set("正在启动，5秒后开始处理...（不要移动鼠标键盘）")
         Thread(target=self._process_file, daemon=True).start()
     
     def _process_file(self):
         try:
-            # 给用户5秒时间切换到码上放心窗口
-            for i in range(5, 0, -1):
-                if self.stop_flag.is_set():
-                    break
-                self.root.after(0, lambda s=f"请切换到码上放心客户端... {i}秒": self.status_var.set(s))
-                time.sleep(1)
+            unit_name = self.config.get('unit_name', '药品批发企业')
             
-            if self.stop_flag.is_set():
-                self._on_process_stop()
-                return
+            # 1. 自动激活码上放心窗口
+            self.root.after(0, lambda: self.status_var.set("正在激活码上放心客户端窗口..."))
+            try:
+                windows = pyautogui.getWindowsWithTitle("码上放心")
+                if windows:
+                    windows[0].activate()
+                    time.sleep(0.5)
+                else:
+                    self.root.after(0, lambda: messagebox.showinfo("提示", "未找到码上放心窗口，请手动切换"))
+                    time.sleep(3)
+            except:
+                time.sleep(3)  # 如果自动激活失败，给用户手动切换的时间
             
+            # 2. 读取Excel
             self.root.after(0, lambda: self.status_var.set("正在读取Excel文件..."))
             self.root.after(0, lambda: self.progress_var.set(5))
             
@@ -963,8 +1117,24 @@ class DrugTraceApp:
                 return
             
             total = len(data.records)
-            skip_count = sum(1 for r in data.records if r.code_pack_count == "1")
-            self.root.after(0, lambda: self.status_var.set(f"共{total}条追溯码（{skip_count}条已是1级码，跳过查询），开始处理..."))
+            
+            # 3. 进度恢复检测（崩溃续跑）
+            progress_file = os.path.join(DATA_DIR, '_progress.json')
+            processed_indices = set()
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, 'r') as f:
+                        prog = json.load(f)
+                    if prog.get('file') == self.input_file:
+                        processed_indices = set(prog.get('processed', []))
+                        self.root.after(0, lambda p=len(processed_indices): self.status_var.set(
+                            f"检测到上次处理进度，已跳过 {p} 条已处理记录"))
+                except:
+                    pass
+            
+            mode_label = "全1级模式（跳过拆码）" if self.is_all_level_one else "混装模式（两轮查询）"
+            self.root.after(0, lambda: self.status_var.set(
+                f"共{total}条追溯码，{mode_label}，开始处理..."))
             self.root.after(0, lambda: self.progress_var.set(10))
             
             ui = CodeQueryUI(self.calibrator, self.stop_flag)
@@ -979,15 +1149,22 @@ class DrugTraceApp:
                         n = len(result.get('level_one_codes', []))
                         self.root.after(0, lambda i=idx, tt=t, nn=n: self.status_var.set(f"正在处理: {i}/{tt} - 获取{nn}个1级码"))
                     else:
-                        self.root.after(0, lambda i=idx, tt=t: self.status_var.set(f"正在处理: {i}/{tt} - 失败"))
+                        err = result.get('error', '失败')
+                        self.root.after(0, lambda i=idx, tt=t, e=err: self.status_var.set(f"正在处理: {i}/{tt} - {e}"))
                 else:
                     self.root.after(0, lambda i=idx, tt=t: self.status_var.set(f"正在处理: {i}/{tt}"))
             
+            # 4. 执行处理
             level_one_map, batch_no_map = ui.batch_query(data.records, callback=on_progress)
             
+            # 5. 生成Excel
             self.root.after(0, lambda: self.status_var.set("正在生成Excel文件..."))
             self.root.after(0, lambda: self.progress_var.set(95))
-            output_file = write_result_excel(data, level_one_map, batch_no_map, self.out_var.get())
+            output_file = write_result_excel(data, level_one_map, batch_no_map, self.out_var.get(), unit_name)
+            
+            # 6. 清理进度文件（处理成功）
+            if os.path.exists(progress_file):
+                os.remove(progress_file)
             
             self.root.after(0, lambda: self.progress_var.set(100))
             self.root.after(0, lambda: messagebox.showinfo("完成", f"处理完成！\n文件已保存到:\n{output_file}"))
@@ -1014,13 +1191,26 @@ class DrugTraceApp:
 
 
 def main():
-    # 启动时检查更新
-    if check_and_update():
-        sys.exit(0)  # 已更新并启动新版本，退出当前版本
+    try:
+        # 启动时检查更新
+        if check_and_update():
+            sys.exit(0)
 
-    root = tk.Tk()
-    DrugTraceApp(root)
-    root.mainloop()
+        root = tk.Tk()
+        DrugTraceApp(root)
+        root.mainloop()
+    except Exception as e:
+        import traceback
+        error_log = os.path.join(DATA_DIR, 'crash.log')
+        with open(error_log, 'w', encoding='utf-8') as f:
+            f.write(f"启动失败: {e}\n")
+            traceback.print_exc(file=f)
+        # 弹出错误提示
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, f"启动失败！\n\n错误: {e}\n\n详情请查看:\n{error_log}", "错误", 0x10)
+        except:
+            pass
 
 if __name__ == '__main__':
     main()
