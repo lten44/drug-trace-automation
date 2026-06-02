@@ -11,7 +11,7 @@ import logging
 import shutil
 
 # 版本号
-VERSION = "v2.3"
+VERSION = "v2.3.1"
 
 # 自动更新配置
 VERSION_FILE = "version.json"
@@ -427,7 +427,7 @@ class CodeQueryUI:
         pyautogui.hotkey('ctrl', 'a')
         time.sleep(0.1)
         # 用剪贴板粘贴（避免输入法问题）
-        self._pc.copy(code)
+        pyperclip.copy(code)
         pyautogui.hotkey('ctrl', 'v')
         time.sleep(0.3)
     
@@ -447,7 +447,7 @@ class CodeQueryUI:
                 time.sleep(0.5)
                 
                 # 剪贴板检查 + 重试
-                raw_text = self._pc.paste()
+                raw_text = pyperclip.paste()
                 if not raw_text or not raw_text.strip():
                     if attempt < max_retries:
                         logger.debug(f"复制结果为空，重试 ({attempt}/{max_retries})")
@@ -1079,11 +1079,6 @@ class DrugTraceApp:
         
         self.stop_flag.clear()
         self.is_running = True
-        self.start_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
-        self.status_var.set("正在启动，5秒后开始处理...（不要移动鼠标键盘）")
-        self.stop_flag.clear()
-        self.is_running = True
         self.is_all_level_one = self.all_level_one_var.get()  # 保存到实例变量供_process_file使用
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
@@ -1115,6 +1110,13 @@ class DrugTraceApp:
             if not data.records:
                 self.root.after(0, lambda: self.status_var.set("错误：未找到追溯码记录"))
                 return
+            
+            # 过滤已处理的记录（崩溃续跑）
+            if processed_indices:
+                data.records = [r for i, r in enumerate(data.records) if i not in processed_indices]
+                if not data.records:
+                    self.root.after(0, lambda: self.status_var.set("所有记录已处理完毕"))
+                    return
             
             total = len(data.records)
             
@@ -1155,7 +1157,23 @@ class DrugTraceApp:
                     self.root.after(0, lambda i=idx, tt=t: self.status_var.set(f"正在处理: {i}/{tt}"))
             
             # 4. 执行处理
-            level_one_map, batch_no_map = ui.batch_query(data.records, callback=on_progress)
+            if self.is_all_level_one:
+                # 极速模式：所有行都是1级码，只查询第一行获取批号
+                self.root.after(0, lambda: self.status_var.set("极速模式：所有追溯码已是1级码，仅查询一次获取批号..."))
+                first_record = data.records[0]
+                result = ui.query_batch_only(first_record.trace_code)
+                batch_no = result.get("batch_no", "")
+                
+                level_one_map = {}
+                batch_no_map = {}
+                for record in data.records:
+                    level_one_map[record.trace_code] = [record.trace_code]
+                    if batch_no:
+                        batch_no_map[record.trace_code] = batch_no
+                
+                self.root.after(0, lambda: self.progress_var.set(90))
+            else:
+                level_one_map, batch_no_map = ui.batch_query(data.records, callback=on_progress)
             
             # 5. 生成Excel
             self.root.after(0, lambda: self.status_var.set("正在生成Excel文件..."))
