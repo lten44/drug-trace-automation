@@ -607,8 +607,8 @@ class CalibrateWindow:
         # 不设置 grab_set()，允许用户自由切换窗口操作码上放心
         self.win.attributes('-topmost', True)  # 置顶
         
-        # 绑定F5热键
-        self.win.bind('<F5>', lambda e: self._capture_position())
+        # 绑定F5热键（全局，切换窗口后仍生效）
+        self.win.bind_all('<F5>', lambda e: self._capture_position())
         
         tk.Label(self.win, text="校准模式 - 按 F5 记录鼠标位置", font=("Microsoft YaHei", 14, "bold")).pack(pady=12)
         
@@ -700,6 +700,10 @@ class DrugTraceApp:
         self.input_file = ""
         self.is_running = False
         self.stop_flag = threading.Event()
+        
+        # 启动 F1×2 紧急停止监听
+        self._start_emergency_stop()
+        
         self._create_widgets()
         self._update_calib_status()
     
@@ -721,6 +725,32 @@ class DrugTraceApp:
         else:
             self.calib_status.config(text="❌ 未校准，请先校准", fg="#ff4d4f")
             self.start_btn.config(state=tk.DISABLED)
+    
+    def _start_emergency_stop(self):
+        """后台监听 F1+F1 紧急停止（全局有效，无需焦点）"""
+        VK_F1 = 0x70
+        last_press = [0]  # 用列表避免闭包问题
+        
+        def monitor():
+            import ctypes
+            while True:
+                if ctypes.windll.user32.GetAsyncKeyState(VK_F1) & 0x8000:
+                    now = time.time()
+                    if now - last_press[0] < 1.0:
+                        # 两次 F1 间隔小于 1 秒，触发急停
+                        self.stop_flag.set()
+                        self.root.after(0, lambda: self.status_var.set("⚠️ 已紧急停止！"))
+                        self.root.after(0, lambda: messagebox.showwarning("紧急停止", 
+                            "已检测到 F1+F1 紧急停止指令，操作已中断。"))
+                        last_press[0] = 0
+                        time.sleep(1)  # 防重复触发
+                    else:
+                        last_press[0] = now
+                    time.sleep(0.3)  # 消抖
+                time.sleep(0.05)
+        
+        t = threading.Thread(target=monitor, daemon=True)
+        t.start()
     
     def _create_widgets(self):
         # 配色方案
@@ -980,36 +1010,39 @@ class DrugTraceApp:
         """显示操作前警告对话框"""
         win = tk.Toplevel(self.root)
         win.title("⚠️  操作确认")
-        win.geometry("500x320")
         win.resizable(False, False)
         win.transient(self.root)
         win.grab_set()
-        win.attributes('-topmost', True)
         
         # 红底标题
-        title_frame = tk.Frame(win, bg="#cf1322", pady=18)
+        title_frame = tk.Frame(win, bg="#cf1322", pady=14)
         title_frame.pack(fill=tk.X)
         tk.Label(title_frame, text="⚠️  电脑即将自动进行操作",
-                font=("Microsoft YaHei", 16, "bold"), bg="#cf1322", fg="white").pack()
+                font=("Microsoft YaHei", 14, "bold"), bg="#cf1322", fg="white").pack()
         
-        body_frame = tk.Frame(win, padx=30, pady=16)
+        body_frame = tk.Frame(win, padx=24, pady=12)
         body_frame.pack(fill=tk.BOTH, expand=True)
         
         warning_lines = [
-            f"当前模式: {'全 1 级模式（零散药品）' if all_level_one else '混装模式（含非1级码）'}",
-            f"待处理: {total} 条追溯码",
+            f"模式: {'全 1 级（零散药品）' if all_level_one else '混装（含非1级码）'}   待处理: {total} 条",
             "",
             "请确保码上放心客户端已打开并处于登录状态！",
             "操作期间请不要移动鼠标或敲击键盘！",
             "否则可能导致操作失败或数据错误！",
+            "紧急停止: 连续按两次 F1",
         ]
         for line in warning_lines:
-            fg_color = "#cf1322" if "不要" in line or "确保" in line else "#333"
-            tk.Label(body_frame, text=line, font=("Microsoft YaHei", 10, "bold" if fg_color=="#cf1322" else "normal"),
+            if "紧急停止" in line:
+                fg_color = "#faad14"
+            elif "不要" in line or "确保" in line:
+                fg_color = "#cf1322"
+            else:
+                fg_color = "#333"
+            tk.Label(body_frame, text=line, font=("Microsoft YaHei", 10, "bold" if fg_color!="#333" else "normal"),
                     fg=fg_color).pack(anchor="w", pady=1)
         
         # 按钮
-        btn_frame = tk.Frame(win, pady=10)
+        btn_frame = tk.Frame(win, pady=8)
         btn_frame.pack(fill=tk.X)
         
         result_flag = {"confirmed": False}
@@ -1022,11 +1055,22 @@ class DrugTraceApp:
             win.destroy()
         
         tk.Button(btn_frame, text="确 定", command=on_confirm,
-                 font=("Microsoft YaHei", 12, "bold"), bg="#cf1322", fg="white",
+                 font=("Microsoft YaHei", 11, "bold"), bg="#cf1322", fg="white",
                  width=10, height=1, relief=tk.FLAT, cursor="hand2").pack(side=tk.LEFT, padx=(0, 10))
         tk.Button(btn_frame, text="取 消", command=on_cancel,
-                 font=("Microsoft YaHei", 12), bg="#e8e8e8", fg="#333",
+                 font=("Microsoft YaHei", 11), bg="#e8e8e8", fg="#333",
                  width=10, height=1, relief=tk.FLAT, cursor="hand2").pack(side=tk.RIGHT)
+        
+        # 居中显示
+        win.update_idletasks()
+        win_width = 420
+        win_height = 240
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+        x = (screen_w - win_width) // 2
+        y = (screen_h - win_height) // 2
+        win.geometry(f"{win_width}x{win_height}+{x}+{y}")
+        win.attributes('-topmost', True)
         
         self.root.wait_window(win)
         return result_flag["confirmed"]
