@@ -29,8 +29,8 @@ Write-Host "[OK] Cleaned" -ForegroundColor Green
 
 # 3. PyInstaller
 Write-Host "[3/4] Building exe..." -ForegroundColor Yellow
-$spec = Get-Item "*.spec" | Where-Object { $_.Name.StartsWith("药品") }
-pyinstaller $spec.FullName --noconfirm --clean
+$spec = "药品批发企业追朔码自动处理软件.spec"
+pyinstaller $spec --noconfirm --clean
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] PyInstaller failed" -ForegroundColor Red
     exit 1
