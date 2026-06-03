@@ -1,5 +1,5 @@
 {
-  "version": "v2.3.2",
+  "version": "v3.0",
   "updateDate": "2026-06-02",
-  "description": "药品批发企业追朔码自动处理软件 v2.3.2 - 修复5个bug：F5全局校准/NameError/弹窗居中/窗口缩小/双击F1停止"
+  "description": "药品批发企业追朔码自动处理软件 v3.0 - 统一排重模式+输入表匹配+UI全面美化"
 }

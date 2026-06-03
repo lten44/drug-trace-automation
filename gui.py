@@ -11,7 +11,7 @@ import logging
 import shutil
 
 # 版本号
-VERSION = "v2.3.2"
+VERSION = "v3.0"
 
 # 自动更新配置
 VERSION_FILE = "version.json"
@@ -201,6 +201,18 @@ def read_sales_excel(file_path: str) -> ExcelData:
         if tc is None: continue
         tc = str(tc).strip()
         if not tc: continue
+        # 空白码包装数处理：重读1次确认，仍空白则标记为'?'（异常码）
+        raw_pack = row_values[col_map.get("码包装数", 7)]
+        pack_str = _safe_str(raw_pack)
+        if not pack_str:
+            # 重读一次
+            retry = ws.cell(row=row_idx, column=col_map.get("码包装数", 7) + 1).value
+            if retry is not None and str(retry).strip():
+                pack_str = str(retry).strip()
+            else:
+                pack_str = "?"  # 标记异常
+                logger.debug(f"第{row_idx}行码包装数为空，标记为异常")
+        
         data.records.append(TraceRecord(
             trace_code=tc,
             drug_name=_safe_str(row_values[col_map.get("药品器械名称", 1)]),
@@ -209,7 +221,7 @@ def read_sales_excel(file_path: str) -> ExcelData:
             approval_no=_safe_str(row_values[col_map.get("批准文号", 4)]),
             manufacturer=_safe_str(row_values[col_map.get("生产厂家", 5)]),
             code_type=_safe_str(row_values[col_map.get("码类型", 6)]),
-            code_pack_count=_safe_str(row_values[col_map.get("码包装数", 7)]),
+            code_pack_count=pack_str,
             loose_count=_safe_str(row_values[col_map.get("零头数", 8)]),
             production_info=_safe_str(row_values[col_map.get("生产信息", 9)]),
             batch_no=_safe_str(row_values[col_map.get("产品批号", 10)]),
@@ -364,6 +376,29 @@ def filter_level_one(raw_text):
     logger.debug(f"过滤后1级码共 {len(codes)} 个: {codes[:5]}{'...' if len(codes) > 5 else ''}")
     return codes
 
+
+def extract_all_codes(raw_text):
+    """从复制结果中提取全部码（3级+2级+1级），返回 set"""
+    if not raw_text or not raw_text.strip():
+        return set()
+    
+    all_codes = set()
+    lines = raw_text.strip().split("\n")
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # 跳过级别标记（3级码、2级码、1级码等）
+        if re.match(r"^\d级码", line):
+            continue
+        # 收集所有16-24位的纯数字追溯码
+        if re.match(r"^\d{16,24}$", line):
+            all_codes.add(line)
+    
+    logger.debug(f"提取全部码共 {len(all_codes)} 个")
+    return all_codes
+
 # ============================================================
 # UI 自动化 - 使用 pyautogui 模拟鼠标键盘
 # ============================================================
@@ -414,21 +449,36 @@ class ScreenCalibrator:
 class CodeQueryUI:
     """使用pyautogui模拟鼠标键盘操作码上放心客户端"""
     
-    def __init__(self, calibrator, stop_flag=None):
+    def __init__(self, calibrator, stop_flag=None, fail_callback=None):
         self.cal = calibrator
         self._pc = pyperclip
         self.stop_flag = stop_flag if stop_flag else threading.Event()
+        self.fail_callback = fail_callback  # 失败回调，用于弹窗报警
         if not self.cal.is_calibrated():
             raise RuntimeError("请先完成校准！点击'校准位置'按钮")
+    
+    def _activate_window(self):
+        """尝试激活码上放心窗口"""
+        try:
+            windows = pyautogui.getWindowsWithTitle("码上放心")
+            if windows:
+                windows[0].activate()
+                time.sleep(0.3)
+                return True
+        except:
+            pass
+        return False
     
     def _click(self, name):
         pos = self.cal.get(name)
         if not pos:
             raise RuntimeError(f"未校准: {name}")
+        self._activate_window()  # 每步点击前激活窗口
         pyautogui.click(pos['x'], pos['y'])
     
     def _type_code(self, code):
         pos = self.cal.get("input_box")
+        self._activate_window()  # 每次输入前激活窗口
         # 点击输入框
         pyautogui.click(pos['x'], pos['y'])
         time.sleep(0.3)
@@ -441,8 +491,8 @@ class CodeQueryUI:
         time.sleep(0.3)
     
     def query_single(self, trace_code):
-        """查询追溯码，获取1级码列表和产品批号（带重试机制）"""
-        result = {"success": False, "code": trace_code, "level_one_codes": [], "batch_no": "", "error": ""}
+        """查询追溯码，获取1级码列表、全部码集合和产品批号（带重试机制）"""
+        result = {"success": False, "code": trace_code, "level_one_codes": [], "all_codes": set(), "batch_no": "", "error": ""}
         
         max_retries = 3
         for attempt in range(1, max_retries + 1):
@@ -468,6 +518,7 @@ class CodeQueryUI:
                 
                 level_one = filter_level_one(raw_text)
                 result["level_one_codes"] = level_one
+                result["all_codes"] = extract_all_codes(raw_text)
                 
                 # 批号获取（内部重试2次）
                 batch_no = ""
@@ -547,42 +598,172 @@ class CodeQueryUI:
         
         return result
 
-    def batch_query(self, records, callback=None):
-        """批量查询，码包装数为1的行跳过追溯码查询，直接获取批号"""
+    def _handle_fail(self, code, result):
+        """处理查询失败：通过回调弹窗让用户选择 继续/重试/停止"""
+        if self.fail_callback:
+            action = self.fail_callback(code, result.get("error", "未知错误"))
+            if action == "retry":
+                return "retry"
+            elif action == "stop":
+                raise StopIteration("用户选择停止")
+            else:  # continue
+                return "skip"
+        return "skip"
+
+    def batch_query_unified(self, records, input_trace_codes=None, callback=None):
+        """
+        统一批量查询（不分全1级/混装模式）。
+        
+        核心逻辑：
+        - 用 covered_set 记录所有已查过的码（3级+2级+1级），排重
+        - 用 output_1level_set 记录已输出的1级码，防重复
+        - input_trace_codes: 输入表所有追溯码集合，供1级码同箱匹配
+        - 先按码包装数降序排列，保证父码先处理
+        - 一次查询两用：全量码→排重，1级码→输出
+        """
         level_one_map = {}
         batch_no_map = {}
+        covered_set = set()      # 所有已覆盖的码（3级+2级+1级）
+        output_1level_set = set() # 已输出的1级码
         total = len(records)
         
-        for idx, record in enumerate(records, 1):
+        # 按码包装数降序排列（3级→2级→1级），保证父级先处理
+        def sort_key(r):
+            pc = r.code_pack_count
+            if pc == "" or pc == "?":
+                return 2  # 异常码放中间处理
+            try:
+                n = int(pc)
+                if n > 1:
+                    return 0  # 3级/2级码优先
+                else:
+                    return 1  # 1级码
+            except:
+                return 2
+        
+        sorted_records = sorted(records, key=sort_key)
+        code_to_orig = {r.trace_code: r for r in records}
+        
+        for idx, record in enumerate(sorted_records, 1):
             if self.stop_flag.is_set():
                 raise StopIteration("用户停止执行")
             
             code = record.trace_code
-            is_already_level_one = (record.code_pack_count == "1")
+            pack_count = record.code_pack_count
             
-            if callback:
-                if is_already_level_one:
-                    callback(idx, total, code, {"skip": True})
-                else:
-                    callback(idx, total, code, None)
+            # ── 排重判断 ──
+            if code in covered_set:
+                if callback:
+                    callback(idx, total, code, {"skip": True, "reason": f"已被其他码覆盖"})
+                level_one_map[code] = []
+                continue
             
-            if is_already_level_one:
-                result = self.query_batch_only(code)
-                level_one_map[code] = [code]
-                if result.get("batch_no"):
-                    batch_no_map[code] = result["batch_no"]
+            if pack_count == "1" and code in output_1level_set:
                 if callback:
-                    callback(idx, total, code, result)
-            else:
-                result = self.query_single(code)
-                if result["success"]:
-                    level_one_map[code] = result["level_one_codes"] if result["level_one_codes"] else [code]
-                    if result.get("batch_no"):
-                        batch_no_map[code] = result["batch_no"]
-                else:
-                    level_one_map[code] = [code]
-                if callback:
-                    callback(idx, total, code, result)
+                    callback(idx, total, code, {"skip": True, "reason": "1级码已输出过"})
+                level_one_map[code] = []
+                continue
+            
+            # ── 开始查询 ──
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
+                if self.stop_flag.is_set():
+                    raise StopIteration("用户停止执行")
+                
+                try:
+                    if pack_count == "1":
+                        # 1级码：完整查询 → 查出同箱全部1级码 → 只保留输入表中也存在的（零散货匹配）
+                        # 关键：只把实际输出的码加入covered_set，不覆盖整箱（防止混装不同批号被误跳）
+                        if callback:
+                            callback(idx, total, code, None)
+                        result = self.query_single(code)
+                        if result["success"]:
+                            level_one = result.get("level_one_codes", [])
+                            # 与输入表对比，只保留重复项（即零散货自身）
+                            if input_trace_codes:
+                                matched = [c for c in level_one if c in input_trace_codes]
+                            else:
+                                matched = level_one
+                            new_codes = [c for c in matched if c not in output_1level_set]
+                            if new_codes:
+                                level_one_map[code] = new_codes
+                                if result.get("batch_no"):
+                                    batch_no_map[code] = result["batch_no"]
+                                # 只加实际输出的，不加整箱（防止混装不同批号被误跳）
+                                output_1level_set.update(new_codes)
+                                covered_set.update(new_codes)
+                            else:
+                                level_one_map[code] = []
+                            if callback:
+                                callback(idx, total, code, result)
+                            break
+                        else:
+                            if attempt < max_retries:
+                                logger.debug(f"1级码查询失败，重试 ({attempt}/{max_retries})")
+                                time.sleep(1)
+                                continue
+                            action = self._handle_fail(code, result)
+                            if action == "retry":
+                                attempt = 0
+                                continue
+                            elif action == "skip":
+                                level_one_map[code] = [code]
+                                if callback:
+                                    callback(idx, total, code, result)
+                                break
+                    else:
+                        # 2级/3级码：完整查询→提取全部码→排重→输出1级码
+                        if callback:
+                            callback(idx, total, code, None)
+                        result = self.query_single(code)
+                        if result["success"]:
+                            all_codes = result.get("all_codes", set())
+                            covered_set.update(all_codes)  # 全部码加入已覆盖集合排重
+                            
+                            level_one = result.get("level_one_codes", [])
+                            # 筛选尚未输出的1级码
+                            new_codes = [c for c in level_one if c not in output_1level_set]
+                            if new_codes:
+                                level_one_map[code] = new_codes
+                                if result.get("batch_no"):
+                                    batch_no_map[code] = result["batch_no"]
+                                output_1level_set.update(new_codes)
+                            else:
+                                level_one_map[code] = []
+                            if callback:
+                                callback(idx, total, code, result)
+                            break
+                        else:
+                            if attempt < max_retries:
+                                logger.debug(f"完整查询失败，重试 ({attempt}/{max_retries})")
+                                time.sleep(1)
+                                continue
+                            # 全部重试失败
+                            action = self._handle_fail(code, result)
+                            if action == "retry":
+                                attempt = 0
+                                continue
+                            elif action == "skip":
+                                level_one_map[code] = [code]
+                                if callback:
+                                    callback(idx, total, code, result)
+                                break
+                except StopIteration:
+                    raise
+                except Exception as e:
+                    logger.error(f"处理追溯码 {code} 出错: {str(e)}")
+                    if attempt < max_retries:
+                        time.sleep(1)
+                        continue
+                    action = self._handle_fail(code, {"error": str(e)})
+                    if action == "retry":
+                        attempt = 0
+                        continue
+                    elif action == "skip":
+                        level_one_map[code] = [code]
+                        break
+                    else:
+                        raise StopIteration("用户选择停止")
         
         return level_one_map, batch_no_map
 
@@ -606,18 +787,18 @@ class CalibrateWindow:
         self.current_step = 0
         self.current_x, self.current_y = 0, 0
         self.running = True
-        self._f5_pending = False  # 防止F5在非校准窗口被响应
+        self._f5_pending = False
         self._pynput_listener = None
+        self._last_capture_time = 0  # F5防抖：防止多个监听重复触发
 
         self.win = tk.Toplevel(parent)
         self.win.title("校准 - 按F5记录位置")
         self.win.geometry("480x260")
         self.win.resizable(False, False)
         self.win.transient(parent)
-        # 不设置 grab_set()，允许用户自由切换窗口操作码上放心
-        self.win.attributes('-topmost', True)  # 置顶
+        self.win.attributes('-topmost', True)
 
-        # 绑定F5热键（仅当本窗口在前台时有效 - tkinter 通病）
+        # 绑定F5热键（窗口聚焦时生效）
         self.win.bind('<F5>', lambda e: self._capture_position())
 
         tk.Label(self.win, text="校准模式 - 按 F5 记录鼠标位置", font=("Microsoft YaHei", 13, "bold")).pack(pady=8)
@@ -625,7 +806,6 @@ class CalibrateWindow:
         self.hint_label = tk.Label(self.win, text="", font=("Microsoft YaHei", 12), fg="#667eea")
         self.hint_label.pack(pady=4)
 
-        # 鼠标坐标显示
         coord_frame = tk.Frame(self.win, bg="#f0f0f0", padx=20, pady=10)
         coord_frame.pack(fill=tk.X, padx=20, pady=6)
         self.coord_label = tk.Label(coord_frame, text="当前鼠标位置: (0, 0)",
@@ -635,7 +815,6 @@ class CalibrateWindow:
         self.pos_label = tk.Label(self.win, text="", font=("Microsoft YaHei", 10), fg="gray")
         self.pos_label.pack(pady=3)
 
-        # 按钮
         btn_frame = tk.Frame(self.win)
         btn_frame.pack(pady=6)
 
@@ -645,17 +824,16 @@ class CalibrateWindow:
         tk.Button(btn_frame, text="测试点击", font=("Microsoft YaHei", 10),
                    bg="#52c41a", fg="white", width=10, command=self._test_click).pack(side=tk.LEFT, padx=10)
 
-        # 提示信息强调全局生效
-        tip_text = "💡 F5 全局生效（切换到码上放心窗口也能按）" if PYNPUT_AVAILABLE else "⚠️ F5 仅在当前窗口生效（请先点此窗口再按F5）"
-        tk.Label(self.win, text=tip_text,
+        # 提示
+        tk.Label(self.win, text="F5 全局生效（切换到码上放心窗口也能按）",
                 font=("Microsoft YaHei", 9),
-                fg="#52c41a" if PYNPUT_AVAILABLE else "#ff4d4f").pack(pady=3)
+                fg="#52c41a").pack(pady=3)
 
         # 启动鼠标跟踪线程
         self.mouse_thread = threading.Thread(target=self._track_mouse, daemon=True)
         self.mouse_thread.start()
 
-        # 启动 pynput 全局F5监听（即使本窗口不在前台也能捕获）
+        # ===== 全局F5监听：Windows API + pynput 双重保险 =====
         if PYNPUT_AVAILABLE:
             try:
                 self._pynput_listener = pynput_keyboard.Listener(
@@ -664,12 +842,31 @@ class CalibrateWindow:
                 self._pynput_listener.daemon = True
                 self._pynput_listener.start()
             except Exception as e:
-                print(f"[校准] 启动全局F5监听失败: {e}")
+                print(f"[校准] pynput全局F5启动失败: {e}")
+
+        # Windows API GetAsyncKeyState 轮询作为后备（最可靠）
+        self._api_f5_thread = threading.Thread(target=self._api_f5_monitor, daemon=True)
+        self._api_f5_thread.start()
 
         self._show_step()
 
-        # 窗口关闭时停止监听
         self.win.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _api_f5_monitor(self):
+        """Windows API 轮询 F5 按键（全局生效，无需窗口焦点）"""
+        import ctypes
+        VK_F5 = 0x74
+        last_state = False
+        while self.running:
+            try:
+                current_state = bool(ctypes.windll.user32.GetAsyncKeyState(VK_F5) & 0x8000)
+                if current_state and not last_state:
+                    if self.win.winfo_exists():
+                        self.win.after(0, self._capture_position)
+                last_state = current_state
+                time.sleep(0.1)
+            except:
+                time.sleep(0.1)
 
     def _on_global_key_press(self, key):
         """pynput全局键盘事件 - F5即使在码上放心窗口也能触发"""
@@ -724,6 +921,12 @@ class CalibrateWindow:
         self.pos_label.config(text=f"已记录: ({recorded['x']}, {recorded['y']})" if recorded else "已记录: 未记录")
     
     def _capture_position(self):
+        # 防抖：500ms内只响应一次F5
+        now = time.time()
+        if now - self._last_capture_time < 0.5:
+            return
+        self._last_capture_time = now
+        
         name, _ = self.steps[self.current_step]
         x, y = self.current_x, self.current_y
         self.cal.set(name, x, y)
@@ -747,7 +950,7 @@ class DrugTraceApp:
     def __init__(self, root):
         self.root = root
         self.root.title(f"药品追溯码处理工具 {VERSION}")
-        self.root.geometry("560x600")
+        self.root.geometry("580x640")
         self.root.resizable(False, False)
 
         self.config = self._load_config()
@@ -806,178 +1009,179 @@ class DrugTraceApp:
         t.start()
     
     def _create_widgets(self):
-        # 配色方案
-        BG_COLOR = "#f5f7fa"
-        CARD_BG = "#ffffff"
-        PRIMARY = "#667eea"
-        PRIMARY_HOVER = "#5a6fd6"
-        SUCCESS = "#52c41a"
-        DANGER = "#ff4d4f"
-        WARNING = "#faad14"
-        TEXT_PRIMARY = "#1a1a2e"
-        TEXT_SECONDARY = "#8c8c8c"
-        BORDER_COLOR = "#e8e8e8"
+        # 配色方案（Win7-Win11 全兼容）
+        BG_COLOR = "#F3F4F6"
+        CARD_BG = "#FFFFFF"
+        CARD_GLASS = "#FFFFFF"
+        PRIMARY = "#4F46E5"
+        PRIMARY_HOVER = "#4338CA"
+        ACCENT_RED = "#EF4444"
+        ACCENT_AMBER = "#F59E0B"
+        TEXT_PRIMARY = "#1E293B"
+        TEXT_SECONDARY = "#64748B"
+        TEXT_MUTED = "#94A3B8"
+        BORDER = "#E5E7EB"
 
         self.root.configure(bg=BG_COLOR)
 
-        # ===== 标题区域（v2.3 新配色）=====
-        title_frame = tk.Frame(self.root, bg=PRIMARY, pady=10)
+        # ===== 标题区域 =====
+        title_frame = tk.Frame(self.root, bg="#4F46E5", pady=14)
         title_frame.pack(fill=tk.X)
 
-        title_inner = tk.Frame(title_frame, bg=PRIMARY)
-        title_inner.pack()
-        tk.Label(title_inner, text=f"💊 药品批发企业追朔码自动处理软件",
-                font=("Microsoft YaHei", 15, "bold"), bg=PRIMARY, fg="white").pack(side=tk.LEFT)
-        tk.Label(title_inner, text=f"  {VERSION}", font=("Microsoft YaHei", 10, "bold"),
-                bg="#ff6b35", fg="white", padx=6, pady=1).pack(side=tk.LEFT, padx=(6, 0))
-        tk.Label(title_frame, text="自动查询追溯码关联关系，生成1级码表格  |  紧急停止: 双击 F1",
-                font=("Microsoft YaHei", 9), bg=PRIMARY, fg="#d0d8ff").pack(pady=(2, 0))
+        # 标题下方的淡色装饰条
+        accent_bar = tk.Frame(self.root, bg="#818CF8", height=2)
+        accent_bar.pack(fill=tk.X)
 
-        main_frame = tk.Frame(self.root, bg=BG_COLOR, padx=20, pady=8)
+        title_inner = tk.Frame(title_frame, bg="#4F46E5")
+        title_inner.pack()
+        tk.Label(title_inner, text="💊  药品批发企业追朔码自动处理软件",
+                font=("Microsoft YaHei", 14, "bold"), bg="#4F46E5", fg="white").pack(side=tk.LEFT)
+        tk.Label(title_inner, text=f"  {VERSION}", font=("Microsoft YaHei", 8, "bold"),
+                bg="#F97316", fg="white", padx=5, pady=2).pack(side=tk.LEFT, padx=(5, 0))
+        tk.Label(title_frame, text="自动查询追溯码关联关系，生成1级码表格  |  紧急停止: 双击 F1",
+                font=("Microsoft YaHei", 8), bg="#4F46E5", fg="#C7D2FE").pack(pady=(2, 0))
+
+        # ===== 主区域 =====
+        main_frame = tk.Frame(self.root, bg=BG_COLOR, padx=24, pady=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # ===== 卡片1：校准 =====
-        card1 = tk.Frame(main_frame, bg=CARD_BG, highlightbackground=BORDER_COLOR,
-                         highlightthickness=1, padx=12, pady=8)
-        card1.pack(fill=tk.X, pady=(0, 6))
+        # ---- 卡片辅助函数（左侧装饰色条）----
+        def make_glass_card(parent, title_icon_text, accent_color="#4F46E5"):
+            outer = tk.Frame(parent, bg=CARD_GLASS, highlightbackground=BORDER,
+                            highlightthickness=1)
+            outer.pack(fill=tk.X, pady=(0, 8))
 
-        header1 = tk.Frame(card1, bg=CARD_BG)
-        header1.pack(fill=tk.X)
-        tk.Label(header1, text="🔧 按钮校准", font=("Microsoft YaHei", 10, "bold"),
-                bg=CARD_BG, fg=TEXT_PRIMARY).pack(side=tk.LEFT)
-        self.calib_status = tk.Label(header1, text="", font=("Microsoft YaHei", 9),
-                                     bg=CARD_BG)
+            # 左侧色条装饰
+            stripe = tk.Frame(outer, bg=accent_color, width=4)
+            stripe.pack(side=tk.LEFT, fill=tk.Y)
+            stripe.pack_propagate(False)
+
+            # 内容区
+            body = tk.Frame(outer, bg=CARD_GLASS, padx=14, pady=10)
+            body.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            # 标题行
+            hdr = tk.Frame(body, bg=CARD_GLASS)
+            hdr.pack(fill=tk.X, pady=(0, 6))
+            tk.Label(hdr, text=title_icon_text, font=("Microsoft YaHei", 10, "bold"),
+                    bg=CARD_GLASS, fg=TEXT_PRIMARY).pack(side=tk.LEFT)
+            return outer, body, hdr
+
+        # ===== 卡片1：校准（amber 色条）=====
+        card1, body1, hdr1 = make_glass_card(main_frame, "🔧 按钮校准", ACCENT_AMBER)
+        self.calib_status = tk.Label(hdr1, text="", font=("Microsoft YaHei", 8),
+                                     bg=CARD_GLASS)
         self.calib_status.pack(side=tk.LEFT, padx=8)
-        tk.Button(header1, text="校准位置", font=("Microsoft YaHei", 9, "bold"),
-                 bg=WARNING, fg="white", relief=tk.FLAT, padx=12, pady=2,
+        tk.Button(hdr1, text="校准位置", font=("Microsoft YaHei", 9, "bold"),
+                 bg=ACCENT_AMBER, fg="white", relief=tk.FLAT, padx=14, pady=3,
                  command=self._start_calibrate, cursor="hand2",
-                 activebackground="#e6a212").pack(side=tk.RIGHT)
+                 activebackground="#D97706").pack(side=tk.RIGHT)
 
-        # ===== 卡片2：文件选择 =====
-        card2 = tk.Frame(main_frame, bg=CARD_BG, highlightbackground=BORDER_COLOR,
-                         highlightthickness=1, padx=12, pady=8)
-        card2.pack(fill=tk.X, pady=(0, 6))
-
-        tk.Label(card2, text="📂 文件选择", font=("Microsoft YaHei", 10, "bold"),
-                bg=CARD_BG, fg=TEXT_PRIMARY).pack(anchor="w")
+        # ===== 卡片2：文件选择（indigo 色条）=====
+        card2, body2, _ = make_glass_card(main_frame, "📂 文件选择", "#4F46E5")
 
         # 输入文件
-        in_frame = tk.Frame(card2, bg=CARD_BG)
-        in_frame.pack(fill=tk.X, pady=(4, 3))
-        tk.Label(in_frame, text="输入文件:", font=("Microsoft YaHei", 9),
-                bg=CARD_BG, fg=TEXT_SECONDARY, width=8, anchor="w").pack(side=tk.LEFT)
+        in_row = tk.Frame(body2, bg=CARD_GLASS)
+        in_row.pack(fill=tk.X, pady=(0, 5))
+        tk.Label(in_row, text="输入文件", font=("Microsoft YaHei", 9),
+                bg=CARD_GLASS, fg=TEXT_PRIMARY, width=7, anchor="w").pack(side=tk.LEFT)
         self.file_var = tk.StringVar(value="点击右侧按钮选择文件...")
-        tk.Entry(in_frame, textvariable=self.file_var, state="readonly",
-                font=("Microsoft YaHei", 9), relief=tk.FLAT, bg="#f0f0f0").pack(
-                    side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), ipady=3)
-        tk.Button(in_frame, text="浏览", command=self._select_file,
+        tk.Entry(in_row, textvariable=self.file_var, state="readonly",
+                font=("Microsoft YaHei", 9), relief=tk.FLAT, bg="#F8FAFC", bd=1,
+                highlightbackground="#E5E7EB", highlightthickness=1).pack(
+                    side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), ipady=4)
+        tk.Button(in_row, text="浏览", command=self._select_file,
                  font=("Microsoft YaHei", 9), width=6, relief=tk.FLAT,
-                 bg="#e8e8e8", activebackground="#d0d0d0", cursor="hand2").pack(side=tk.RIGHT)
+                 bg="#F1F5F9", fg=TEXT_PRIMARY, activebackground="#E2E8F0",
+                 cursor="hand2", padx=4, pady=2).pack(side=tk.RIGHT)
 
         # 导出位置
-        out_frame = tk.Frame(card2, bg=CARD_BG)
-        out_frame.pack(fill=tk.X, pady=(3, 0))
-        tk.Label(out_frame, text="导出位置:", font=("Microsoft YaHei", 9),
-                bg=CARD_BG, fg=TEXT_SECONDARY, width=8, anchor="w").pack(side=tk.LEFT)
+        out_row = tk.Frame(body2, bg=CARD_GLASS)
+        out_row.pack(fill=tk.X, pady=(0, 5))
+        tk.Label(out_row, text="导出位置", font=("Microsoft YaHei", 9),
+                bg=CARD_GLASS, fg=TEXT_PRIMARY, width=7, anchor="w").pack(side=tk.LEFT)
         self.out_var = tk.StringVar(value=self.config.get('output_path', OUTPUT_FOLDER))
-        tk.Entry(out_frame, textvariable=self.out_var, state="readonly",
-                font=("Microsoft YaHei", 9), relief=tk.FLAT, bg="#f0f0f0").pack(
-                    side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), ipady=3)
-        tk.Button(out_frame, text="浏览", command=self._select_output,
+        tk.Entry(out_row, textvariable=self.out_var, state="readonly",
+                font=("Microsoft YaHei", 9), relief=tk.FLAT, bg="#F8FAFC", bd=1,
+                highlightbackground="#E5E7EB", highlightthickness=1).pack(
+                    side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), ipady=4)
+        tk.Button(out_row, text="浏览", command=self._select_output,
                  font=("Microsoft YaHei", 9), width=6, relief=tk.FLAT,
-                 bg="#e8e8e8", activebackground="#d0d0d0", cursor="hand2").pack(side=tk.RIGHT)
+                 bg="#F1F5F9", fg=TEXT_PRIMARY, activebackground="#E2E8F0",
+                 cursor="hand2", padx=4, pady=2).pack(side=tk.RIGHT)
 
-        # ===== 卡片3：设置默认路径 =====
-        card3 = tk.Frame(main_frame, bg=CARD_BG, highlightbackground=BORDER_COLOR,
-                         highlightthickness=1, padx=12, pady=6)
-        card3.pack(fill=tk.X, pady=(0, 6))
+        # 分隔线 + 默认路径
+        sep = ttk.Separator(body2, orient='horizontal')
+        sep.pack(fill=tk.X, pady=(4, 6))
+        path_hdr = tk.Frame(body2, bg=CARD_GLASS)
+        path_hdr.pack(fill=tk.X)
+        tk.Label(path_hdr, text="⚙️ 默认路径", font=("Microsoft YaHei", 8, "bold"),
+                bg=CARD_GLASS, fg=TEXT_SECONDARY).pack(side=tk.LEFT)
 
-        tk.Label(card3, text="⚙️ 默认路径", font=("Microsoft YaHei", 10, "bold"),
-                bg=CARD_BG, fg=TEXT_PRIMARY).pack(anchor="w")
-
-        path_frame = tk.Frame(card3, bg=CARD_BG)
-        path_frame.pack(fill=tk.X, pady=(4, 0))
-
-        # 默认输入路径
-        in_def_frame = tk.Frame(path_frame, bg=CARD_BG)
-        in_def_frame.pack(fill=tk.X, pady=(0, 3))
-        tk.Label(in_def_frame, text="默认输入:", font=("Microsoft YaHei", 9),
-                bg=CARD_BG, fg=TEXT_SECONDARY, width=8, anchor="w").pack(side=tk.LEFT)
+        def_path_row = tk.Frame(body2, bg=CARD_GLASS)
+        def_path_row.pack(fill=tk.X, pady=(4, 0))
         self.default_input_var = tk.StringVar(value=self.config.get('input_path', DEFAULT_INPUT_PATH))
-        tk.Entry(in_def_frame, textvariable=self.default_input_var, state="readonly",
-                font=("Microsoft YaHei", 9), relief=tk.FLAT, bg="#f0f0f0").pack(
-                    side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), ipady=2)
-        tk.Button(in_def_frame, text="修改", command=self._set_default_input,
-                 font=("Microsoft YaHei", 9), width=5, relief=tk.FLAT,
+        tk.Label(def_path_row, text="输入", font=("Microsoft YaHei", 8),
+                bg=CARD_GLASS, fg=TEXT_MUTED, width=3, anchor="w").pack(side=tk.LEFT)
+        tk.Entry(def_path_row, textvariable=self.default_input_var, state="readonly",
+                font=("Microsoft YaHei", 8), relief=tk.FLAT, bg="#F8FAFC", bd=1,
+                highlightbackground="#E5E7EB", highlightthickness=1).pack(
+                    side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4), ipady=2)
+        tk.Button(def_path_row, text="修改", command=self._set_default_input,
+                 font=("Microsoft YaHei", 8), width=4, relief=tk.FLAT,
                  bg=PRIMARY, fg="white", activebackground=PRIMARY_HOVER,
-                 cursor="hand2").pack(side=tk.RIGHT)
+                 cursor="hand2", padx=6, pady=1).pack(side=tk.RIGHT)
 
-        # 默认输出路径
-        out_def_frame = tk.Frame(path_frame, bg=CARD_BG)
-        out_def_frame.pack(fill=tk.X)
-        tk.Label(out_def_frame, text="默认输出:", font=("Microsoft YaHei", 9),
-                bg=CARD_BG, fg=TEXT_SECONDARY, width=8, anchor="w").pack(side=tk.LEFT)
+        def_path_row2 = tk.Frame(body2, bg=CARD_GLASS)
+        def_path_row2.pack(fill=tk.X, pady=(3, 0))
         self.default_output_var = tk.StringVar(value=self.config.get('output_path', OUTPUT_FOLDER))
-        tk.Entry(out_def_frame, textvariable=self.default_output_var, state="readonly",
-                font=("Microsoft YaHei", 9), relief=tk.FLAT, bg="#f0f0f0").pack(
-                    side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), ipady=2)
-        tk.Button(out_def_frame, text="修改", command=self._set_default_output,
-                 font=("Microsoft YaHei", 9), width=5, relief=tk.FLAT,
+        tk.Label(def_path_row2, text="输出", font=("Microsoft YaHei", 8),
+                bg=CARD_GLASS, fg=TEXT_MUTED, width=3, anchor="w").pack(side=tk.LEFT)
+        tk.Entry(def_path_row2, textvariable=self.default_output_var, state="readonly",
+                font=("Microsoft YaHei", 8), relief=tk.FLAT, bg="#F8FAFC", bd=1,
+                highlightbackground="#E5E7EB", highlightthickness=1).pack(
+                    side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4), ipady=2)
+        tk.Button(def_path_row2, text="修改", command=self._set_default_output,
+                 font=("Microsoft YaHei", 8), width=4, relief=tk.FLAT,
                  bg=PRIMARY, fg="white", activebackground=PRIMARY_HOVER,
-                 cursor="hand2").pack(side=tk.RIGHT)
+                 cursor="hand2", padx=6, pady=1).pack(side=tk.RIGHT)
 
-        # ===== 卡片4：单位设置 + 极速模式 =====
-        card4 = tk.Frame(main_frame, bg=CARD_BG, highlightbackground=BORDER_COLOR,
-                         highlightthickness=1, padx=12, pady=8)
-        card4.pack(fill=tk.X, pady=(0, 6))
+        # ===== 卡片3：单位名称设置（teal 色条）=====
+        card3, body3, _ = make_glass_card(main_frame, "🏢 单位名称设置", "#14B8A6")
 
-        tk.Label(card4, text="🏢 单位名称 & 极速模式", font=("Microsoft YaHei", 10, "bold"),
-                bg=CARD_BG, fg=TEXT_PRIMARY).pack(anchor="w")
-
-        unit_frame = tk.Frame(card4, bg=CARD_BG)
-        unit_frame.pack(fill=tk.X, pady=(4, 6))
-        tk.Label(unit_frame, text="单位:", font=("Microsoft YaHei", 9),
-                bg=CARD_BG, fg=TEXT_SECONDARY, width=5, anchor="w").pack(side=tk.LEFT)
+        unit_row = tk.Frame(body3, bg=CARD_GLASS)
+        unit_row.pack(fill=tk.X)
         self.unit_name_var = tk.StringVar(value=self.config.get('unit_name', '药品批发企业'))
-        tk.Entry(unit_frame, textvariable=self.unit_name_var,
+        tk.Entry(unit_row, textvariable=self.unit_name_var,
                 font=("Microsoft YaHei", 9), relief=tk.SOLID, bd=1,
-                bg="#f9f9f9").pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=2)
-        tk.Label(unit_frame, text=" 💡生成文件自动加此前缀",
-                font=("Microsoft YaHei", 8), bg=CARD_BG, fg="#aaa").pack(side=tk.LEFT)
-
-        # 极速模式选项
-        mode_frame = tk.Frame(card4, bg=CARD_BG)
-        mode_frame.pack(fill=tk.X, pady=(2, 0))
-
-        self.all_level_one_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(mode_frame, text="全是 1 级码（零散药品）- 跳过拆码直接查批号",
-                      variable=self.all_level_one_var,
-                      font=("Microsoft YaHei", 9, "bold"),
-                      bg=CARD_BG, fg="#389e0d",
-                      selectcolor=CARD_BG,
-                      activebackground=CARD_BG).pack(anchor="w")
+                bg="#F8FAFC", highlightbackground="#E5E7EB", highlightthickness=1).pack(
+                    side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
+        tk.Label(unit_row, text=" 生成文件名前缀",
+                font=("Microsoft YaHei", 8), bg=CARD_GLASS, fg=TEXT_MUTED).pack(side=tk.LEFT, padx=(5, 0))
 
         # ===== 操作按钮 =====
         btn_frame = tk.Frame(main_frame, bg=BG_COLOR)
-        btn_frame.pack(fill=tk.X, pady=8)
+        btn_frame.pack(fill=tk.X, pady=(4, 6))
 
-        self.start_btn = tk.Button(btn_frame, text="▶  开始处理", command=self._start_process,
+        self.start_btn = tk.Button(btn_frame, text="  ▶   开始处理  ", command=self._start_process,
                                    font=("Microsoft YaHei", 11, "bold"), bg=PRIMARY, fg="white",
-                                   height=2, state=tk.DISABLED, relief=tk.FLAT, cursor="hand2",
-                                   activebackground=PRIMARY_HOVER)
-        self.start_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+                                   height=1, relief=tk.FLAT, cursor="hand2",
+                                   activebackground=PRIMARY_HOVER, padx=16, pady=7,
+                                   disabledforeground="#A5B4FC")  # 禁用时文字仍可见
+        self.start_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
 
-        self.stop_btn = tk.Button(btn_frame, text="⏹  停止", command=self._stop_process,
-                                  font=("Microsoft YaHei", 11, "bold"), bg=DANGER, fg="white",
-                                  height=2, state=tk.DISABLED, relief=tk.FLAT, cursor="hand2",
-                                  activebackground="#e64347")
-        self.stop_btn.pack(side=tk.RIGHT, ipadx=20)
+        self.stop_btn = tk.Button(btn_frame, text="  ⏹   停止  ", command=self._stop_process,
+                                  font=("Microsoft YaHei", 11, "bold"), bg=ACCENT_RED, fg="white",
+                                  height=1, relief=tk.FLAT, cursor="hand2",
+                                  activebackground="#DC2626", padx=16, pady=7,
+                                  disabledforeground="#FCA5A5")
+        self.stop_btn.pack(side=tk.RIGHT, ipadx=24)
 
         # ===== 进度条 =====
         style = ttk.Style()
         style.theme_use('default')
-        style.configure("Custom.Horizontal.TProgressbar", troughcolor='#e0e0e0',
-                        background=PRIMARY, thickness=6)
+        style.configure("Custom.Horizontal.TProgressbar", troughcolor='#E2E8F0',
+                        background="#4F46E5", thickness=8, borderwidth=0)
         self.progress_var = tk.DoubleVar(value=0)
         ttk.Progressbar(main_frame, variable=self.progress_var, maximum=100,
                         style="Custom.Horizontal.TProgressbar").pack(fill=tk.X, pady=(0, 4))
@@ -985,14 +1189,14 @@ class DrugTraceApp:
         tk.Label(main_frame, textvariable=self.status_var, font=("Microsoft YaHei", 9),
                 fg=TEXT_SECONDARY, bg=BG_COLOR).pack(fill=tk.X)
 
-        # ===== 使用提示 (v2.3) =====
-        hint_frame = tk.Frame(main_frame, bg="#f6ffed", highlightbackground="#b7eb8f",
+        # ===== 底部提示 =====
+        hint_frame = tk.Frame(main_frame, bg="#F0FDF4", highlightbackground="#BBF7D0",
                               highlightthickness=1)
-        hint_frame.pack(fill=tk.X, pady=(6, 0))
+        hint_frame.pack(fill=tk.X)
         tk.Label(hint_frame,
-                text="💡 步骤：①校准 ②选Excel ③（可选）勾选零散药品 ④开始处理  丨  ⛔ 紧急停止: 双击F1",
-                font=("Microsoft YaHei", 9), bg="#f6ffed", fg="#555",
-                padx=8, pady=6).pack()
+                text=" ① 校准 ② 选Excel ③ 开始处理（自动排重）  |  ⛔ 紧急停止: 双击F1",
+                font=("Microsoft YaHei", 8), bg="#F0FDF4", fg="#166534",
+                padx=8, pady=5).pack()
     
     def _start_calibrate(self):
         CalibrateWindow(self.root, self.calibrator, self._on_calibrate_complete)
@@ -1090,11 +1294,11 @@ class DrugTraceApp:
         except Exception:
             pass
     
-    def _show_warning_dialog(self, total, all_level_one):
+    def _show_warning_dialog(self, total):
         """显示操作前警告对话框 - 居中显示"""
         win = tk.Toplevel(self.root)
         win.title("⚠️  操作确认")
-        win_w, win_h = 440, 280
+        win_w, win_h = 440, 260
         win.resizable(False, False)
         win.transient(self.root)
         win.grab_set()
@@ -1120,7 +1324,7 @@ class DrugTraceApp:
         body_frame.pack(fill=tk.BOTH, expand=True)
 
         warning_lines = [
-            f"模式: {'全 1 级（零散药品）' if all_level_one else '混装（含非1级码）'}  |  待处理: {total} 条",
+            f"自动排重模式  |  待处理: {total} 条",
             "",
             "请确保码上放心客户端已打开！",
             "操作期间请勿移动鼠标或敲击键盘！",
@@ -1154,6 +1358,66 @@ class DrugTraceApp:
         self.root.wait_window(win)
         return result_flag["confirmed"]
     
+    def _show_fail_dialog(self, code, error_msg):
+        """查询失败弹窗报警 - 用户选择 继续/重试/停止（居中，支持F1急停）"""
+        result = {"action": "skip"}
+        done = threading.Event()
+
+        def show():
+            dialog = tk.Toplevel(self.root)
+            dialog.title("查询失败")
+            dialog.transient(self.root)
+            dialog.grab_set()
+            dialog.attributes('-topmost', True)
+            dialog.resizable(False, False)
+
+            # 居中
+            self.root.update_idletasks()
+            px, py = self.root.winfo_x(), self.root.winfo_y()
+            pw, ph = self.root.winfo_width(), self.root.winfo_height()
+            dw, dh = 380, 160
+            cx = px + (pw - dw) // 2 if pw > dw else (self.root.winfo_screenwidth() - dw) // 2
+            cy = py + (ph - dh) // 2 if ph > dh else (self.root.winfo_screenheight() - dh) // 2
+            dialog.geometry(f"{dw}x{dh}+{cx}+{cy}")
+
+            title_f = tk.Frame(dialog, bg="#cf1322", pady=6)
+            title_f.pack(fill=tk.X)
+            tk.Label(title_f, text="查询失败", font=("Microsoft YaHei", 12, "bold"),
+                    bg="#cf1322", fg="white").pack()
+
+            body = tk.Frame(dialog, padx=16, pady=6)
+            body.pack(fill=tk.BOTH, expand=True)
+            tk.Label(body, text=f"追溯码: {code}", font=("Microsoft YaHei", 9),
+                    fg="#333", anchor="w").pack(anchor="w")
+            tk.Label(body, text=error_msg[:60], font=("Microsoft YaHei", 8),
+                    fg="#999", anchor="w").pack(anchor="w", pady=(0, 4))
+            tk.Label(body, text="F1+F1 可紧急停止", font=("Microsoft YaHei", 8),
+                    fg="#cf1322", anchor="w").pack(anchor="w")
+
+            btn_f = tk.Frame(dialog, pady=4)
+            btn_f.pack(fill=tk.X)
+
+            def choose(action):
+                result["action"] = action
+                dialog.destroy()
+                done.set()
+
+            tk.Button(btn_f, text="跳过", command=lambda: choose("skip"),
+                     font=("Microsoft YaHei", 9), bg="#faad14", fg="white",
+                     width=8, relief=tk.FLAT, cursor="hand2").pack(side=tk.LEFT, padx=(12, 4))
+            tk.Button(btn_f, text="重试", command=lambda: choose("retry"),
+                     font=("Microsoft YaHei", 9, "bold"), bg="#52c41a", fg="white",
+                     width=6, relief=tk.FLAT, cursor="hand2").pack(side=tk.LEFT, padx=4)
+            tk.Button(btn_f, text="停止", command=lambda: choose("stop"),
+                     font=("Microsoft YaHei", 9), bg="#ff4d4f", fg="white",
+                     width=6, relief=tk.FLAT, cursor="hand2").pack(side=tk.RIGHT, padx=(4, 12))
+
+            dialog.wait_window()
+
+        self.root.after(0, show)
+        done.wait()  # 等待对话框关闭再返回
+        return result["action"]
+
     def _start_process(self):
         if not self.calibrator.is_calibrated():
             messagebox.showerror("错误", "请先完成按钮位置校准")
@@ -1169,36 +1433,29 @@ class DrugTraceApp:
         self.config['unit_name'] = unit_name
         self._save_config()
         
-        # 极速模式检测 + 统计行数（一次读取Excel完成）
+        # 统计总行数
         import openpyxl
         wb = openpyxl.load_workbook(self.input_file, data_only=True)
         ws = wb.active
-        pack_counts = set()
         total_rows = 0
         for row_idx in range(7, ws.max_row + 1):
             val = ws.cell(row=row_idx, column=1).value
-            if not val:
-                continue
-            total_rows += 1
-            pack_val = ws.cell(row=row_idx, column=8).value  # H列=码包装数
-            pack_counts.add(str(pack_val).strip() if pack_val else "")
+            if val:
+                total_rows += 1
         wb.close()
-        all_pack_one = pack_counts == {"1"} or pack_counts == {"1", ""}
-        
-        # 自动勾选全是1级码
-        if all_pack_one and not self.all_level_one_var.get():
-            self.all_level_one_var.set(True)
-            self.status_var.set("检测到全部码包装数为1，已自动勾选「全是1级码」")
         
         # 显示警告对话框
-        is_all_level_one = self.all_level_one_var.get() or all_pack_one
-        if not self._show_warning_dialog(total_rows, is_all_level_one):
+        if not self._show_warning_dialog(total_rows):
             self.status_var.set("操作已取消")
             return
         
+        # 5秒倒计时
+        for i in range(5, 0, -1):
+            self.status_var.set(f"⏳ {i} 秒后开始操作...（请勿移动鼠标键盘）")
+            time.sleep(1)
+        
         self.stop_flag.clear()
         self.is_running = True
-        self.is_all_level_one = self.all_level_one_var.get()
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         self.status_var.set("正在启动...（不要移动鼠标键盘）")
@@ -1221,7 +1478,7 @@ class DrugTraceApp:
                     self.root.after(0, lambda: messagebox.showinfo("提示", "未找到码上放心窗口，请手动切换"))
                     time.sleep(3)
             except:
-                time.sleep(3)  # 如果自动激活失败，给用户手动切换的时间
+                time.sleep(3)
             
             # 2. 读取Excel
             self.root.after(0, lambda: self.status_var.set("正在读取Excel文件..."))
@@ -1232,7 +1489,7 @@ class DrugTraceApp:
                 self.root.after(0, lambda: self.status_var.set("错误：未找到追溯码记录"))
                 return
 
-            # 3. 进度恢复检测（崩溃续跑） - 必须先定义再使用
+            # 3. 进度恢复检测（崩溃续跑）
             progress_file = os.path.join(DATA_DIR, '_progress.json')
             processed_indices = set()
             if os.path.exists(progress_file):
@@ -1255,11 +1512,10 @@ class DrugTraceApp:
 
             total = len(data.records)
 
-            # 进度保存：code -> 原始索引映射
+            # 进度保存映射
             code_to_orig_idx = {r.trace_code: i for i, r in enumerate(data.records)}
 
             def save_progress(code):
-                """保存当前已处理的记录到进度文件（F1停止后下次可断点续跑）"""
                 orig_idx = code_to_orig_idx.get(code)
                 if orig_idx is not None:
                     processed_indices.add(orig_idx)
@@ -1272,31 +1528,34 @@ class DrugTraceApp:
                 except Exception as e:
                     logger.debug(f"保存进度失败: {e}")
 
-            mode_label = "全1级模式（跳过拆码）" if self.is_all_level_one else "混装模式（两轮查询）"
-            self.root.after(0, lambda: self.status_var.set(
-                f"共{total}条追溯码，{mode_label}，开始处理..."))
+            self.root.after(0, lambda t=total: self.status_var.set(
+                f"共{t}条追溯码，统一排重模式，开始处理..."))
             self.root.after(0, lambda: self.progress_var.set(10))
 
-            ui = CodeQueryUI(self.calibrator, self.stop_flag)
+            # 建立失败回调（弹窗报警）
+            def on_query_fail(code, error_msg):
+                return self._show_fail_dialog(code, error_msg)
+
+            ui = CodeQueryUI(self.calibrator, self.stop_flag, fail_callback=on_query_fail)
 
             def on_progress(idx, t, code, result):
                 pct = 10 + (idx / t) * 80
                 self.root.after(0, lambda p=pct: self.progress_var.set(p))
                 if result:
                     if result.get('skip'):
-                        self.root.after(0, lambda i=idx, tt=t: self.status_var.set(f"正在处理: {i}/{tt} - 跳过（已是1级码）"))
+                        reason = result.get('reason', '已处理')
+                        self.root.after(0, lambda i=idx, tt=t, r=reason: self.status_var.set(f"处理中: {i}/{tt} - 跳过（{r}）"))
                     elif result.get('success'):
                         n = len(result.get('level_one_codes', []))
-                        self.root.after(0, lambda i=idx, tt=t, nn=n: self.status_var.set(f"正在处理: {i}/{tt} - 获取{nn}个1级码"))
-                        # 成功后保存进度
+                        self.root.after(0, lambda i=idx, tt=t, nn=n: self.status_var.set(f"处理中: {i}/{tt} - 获取{nn}个1级码"))
                         save_progress(code)
                     else:
                         err = result.get('error', '失败')
-                        self.root.after(0, lambda i=idx, tt=t, e=err: self.status_var.set(f"正在处理: {i}/{tt} - {e}"))
+                        self.root.after(0, lambda i=idx, tt=t, e=err: self.status_var.set(f"处理中: {i}/{tt} - {e}"))
                 else:
-                    self.root.after(0, lambda i=idx, tt=t: self.status_var.set(f"正在处理: {i}/{tt}"))
+                    self.root.after(0, lambda i=idx, tt=t: self.status_var.set(f"处理中: {i}/{tt}"))
 
-            # 4. 执行处理（全1级模式 vs 混装模式）
+            # 4. 执行统一批处理
             level_one_map = {}
             batch_no_map = {}
 
@@ -1314,22 +1573,11 @@ class DrugTraceApp:
             if not unprocessed:
                 self.root.after(0, lambda: self.status_var.set("所有记录已处理完毕"))
                 self.root.after(0, lambda: self.progress_var.set(90))
-            elif self.is_all_level_one:
-                # 全1级模式：只查第一行的批号，复用给所有行
-                self.root.after(0, lambda: self.status_var.set("全1级模式：查询第一行获取批号..."))
-                first_code = unprocessed[0].trace_code
-                result = ui.query_batch_only(first_code)
-                batch_no = result.get("batch_no", "")
-                for record in unprocessed:
-                    level_one_map[record.trace_code] = [record.trace_code]
-                    if batch_no:
-                        batch_no_map[record.trace_code] = batch_no
-                    # 全1级模式：每行都标记为已处理
-                    save_progress(record.trace_code)
-                self.root.after(0, lambda: self.progress_var.set(90))
             else:
-                # 混装模式：两轮查询
-                level_one_map, batch_no_map = ui.batch_query(unprocessed, callback=on_progress)
+                # 构建输入表追溯码集合（供1级码同箱匹配）
+                input_trace_set = set(r.trace_code for r in data.records)
+                level_one_map, batch_no_map = ui.batch_query_unified(
+                    unprocessed, input_trace_codes=input_trace_set, callback=on_progress)
             
             # 5. 生成Excel
             self.root.after(0, lambda: self.status_var.set("正在生成Excel文件..."))
