@@ -59,7 +59,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 
 [Files]
 ; 主程序文件（所有 PyInstaller 输出）
-Source: "dist\药品批发企业追朔码自动处理软件\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\药品批发企业追朔码自动处理软件.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; 图标文件
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
