@@ -46,3 +46,8 @@ Desktop.ini
 *.tmp
 *.bak
 *.log
+*.old
+
+# 发布脚本输出
+Setup-*.exe
+Output/
