@@ -24,6 +24,7 @@ wheels/
 *.manifest
 *.spec
 !build.spec
+!build-v3.spec
 
 # 自动生成的配置文件（用户本地数据）
 calibration.json

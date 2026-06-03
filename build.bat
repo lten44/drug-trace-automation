@@ -14,7 +14,7 @@ rmdir /s /q build 2>nul
 echo [OK] Cleaned.
 
 echo [Step 2/3] PyInstaller building...
-pyinstaller "药品批发企业追朔码自动处理软件.spec" --noconfirm --clean
+pyinstaller "build-v3.spec" --noconfirm --clean
 if errorlevel 1 (
     echo [ERROR] PyInstaller failed!
     pause
