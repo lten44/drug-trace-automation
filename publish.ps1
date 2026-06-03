@@ -29,7 +29,7 @@ Write-Host "[OK] Cleaned" -ForegroundColor Green
 
 # 3. PyInstaller
 Write-Host "[3/4] Building exe..." -ForegroundColor Yellow
-$spec = "药品批发企业追朔码自动处理软件.spec"
+$spec = "build-v3.spec"
 pyinstaller $spec --noconfirm --clean
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] PyInstaller failed" -ForegroundColor Red
