@@ -11,7 +11,7 @@ import logging
 import shutil
 
 # 版本号
-VERSION = "v3.0"
+VERSION = "v3.0.1"
 
 # 自动更新配置
 VERSION_FILE = "version.json"
