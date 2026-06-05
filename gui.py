@@ -11,7 +11,10 @@ import logging
 import shutil
 
 # 版本号
-VERSION = "v3.1"
+VERSION = "v3.1.1"
+
+# 校准方案版本：每次修改校准点（新增/删除/变更）时+1
+CALIBRATION_VERSION = 2
 
 # 自动更新配置
 VERSION_FILE = "version.json"
@@ -432,6 +435,7 @@ class ScreenCalibrator:
         return {}
     
     def _save(self):
+        self.positions['__calib_version__'] = CALIBRATION_VERSION
         with open(self.config_file, 'w', encoding='utf-8') as f:
             json.dump(self.positions, f, ensure_ascii=False, indent=2)
     
@@ -443,6 +447,10 @@ class ScreenCalibrator:
         self._save()
     
     def is_calibrated(self):
+        """检查是否已校准且版本匹配：如果校准方案有更新则强制重新校准"""
+        saved_version = self.positions.get('__calib_version__', 0)
+        if saved_version < CALIBRATION_VERSION:
+            return False
         return all(k in self.positions for k in ["input_box", "query_btn", "copy_btn", "batch_no_pos", "copy_btn_after"])
 
 
@@ -1054,10 +1062,16 @@ class DrugTraceApp:
             json.dump(self.config, f, ensure_ascii=False, indent=2)
     
     def _update_calib_status(self):
+        # 判断是否有旧版校准但版本过低
+        cal_version = self.calibrator.positions.get('__calib_version__', 0)
+        has_old_cal = bool(self.calibrator.positions) and cal_version < CALIBRATION_VERSION
         calibrated = self.calibrator.is_calibrated()
         if calibrated:
             self.calib_status.config(text="✅ 已校准", fg="#52c41a")
             self.start_btn.config(state=tk.NORMAL if self.input_file else tk.DISABLED)
+        elif has_old_cal:
+            self.calib_status.config(text="⚠️ 校准已过期，请重新校准（v3.1新增拖选定位点）", fg="#fa8c16")
+            self.start_btn.config(state=tk.DISABLED)
         else:
             self.calib_status.config(text="❌ 未校准，请先校准", fg="#ff4d4f")
             self.start_btn.config(state=tk.DISABLED)
