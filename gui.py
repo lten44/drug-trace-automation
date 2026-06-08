@@ -11,7 +11,7 @@ import logging
 import shutil
 
 # 版本号
-VERSION = "v3.1.1"
+VERSION = "v3.1.2"
 
 # 校准方案版本：每次修改校准点（新增/删除/变更）时+1
 CALIBRATION_VERSION = 2
@@ -606,65 +606,6 @@ class CodeQueryUI:
         
         return result
 
-    def _drag_select_right_panel(self):
-        """
-        在右侧面板用鼠标拖选选中当前2级码对应的1级码文本。
-        前提：查询执行完毕，当前2级码已自动选中，右侧面板显示其1级码。
-        
-        校准点:
-          right_panel_bottom — 「共X个追溯码」文字位置
-          right_panel_top   — 右侧面板顶部第一个1级码上方空白处
-        
-        根据两个点的y坐标差计算拖动距离，适配任意窗口大小。
-        
-        返回: 纯1级码列表（已去除"复制""共X个追溯码"等杂乱信息）
-        """
-        bottom = self.cal.get("right_panel_bottom")
-        top = self.cal.get("right_panel_top")
-        if not bottom or not top:
-            logger.warning("未校准 right_panel_bottom + right_panel_top，无法拖选")
-            return []
-        
-        drag_y = bottom['y'] - top['y'] + 20  # y坐标差 + 20px余量
-        drag_x = bottom['x'] - top['x'] + 20   # x坐标差 + 20px余量
-        
-        self._activate_window()
-        # 点击「共X个追溯码」位置
-        pyautogui.click(bottom['x'], bottom['y'])
-        time.sleep(0.15)
-        # 按住左键，向左上角拖动（按校准点计算的距离）
-        pyautogui.mouseDown(button='left')
-        time.sleep(0.05)
-        pyautogui.move(-max(drag_x, 100), -max(drag_y, 100), duration=0.4)
-        time.sleep(0.05)
-        pyautogui.mouseUp(button='left')
-        time.sleep(0.2)
-        # 复制选中内容
-        pyautogui.hotkey('ctrl', 'c')
-        time.sleep(0.35)
-        
-        raw = pyperclip.paste()
-        logger.debug(f"拖选原始内容前200字: {raw[:200]}")
-        
-        # 清理杂乱信息：去掉"复制"、"共X个追溯码"等非码文本
-        cleaned = []
-        for line in raw.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            # 跳过"共X个追溯码"类文本
-            if '共' in line and '个' in line and '追溯码' in line:
-                continue
-            # 去掉行尾的"复制"二字
-            if line.endswith('复制'):
-                line = line[:-2].strip()
-            # 取纯数字码（16-24位纯数字）
-            m = re.search(r'\b(\d{16,24})\b', line)
-            if m:
-                cleaned.append(m.group(1))
-        
-        logger.debug(f"拖选清理后获 {len(cleaned)} 个1级码")
-        return cleaned
 
     def _handle_fail(self, code, result):
         """处理查询失败：通过回调弹窗让用户选择 继续/重试/停止"""
@@ -780,42 +721,24 @@ class CodeQueryUI:
                                     callback(idx, total, code, result)
                                 break
                     else:
-                        # 2级/3级码：拖选精确模式 / 旧行为回退
+                        # 2级/3级码：完整查询→提取全部码→排重→输出1级码
                         if callback:
                             callback(idx, total, code, None)
                         result = self.query_single(code)
                         if result["success"]:
-                            # 判断是否启用拖选精确模式
-                            right_bottom = self.cal.get("right_panel_bottom")
-                            right_top = self.cal.get("right_panel_top")
-                            if right_bottom and right_top:
-                                # 精确模式：拖选右侧面板获取当前2级码的精确1级码
-                                exact_level_one = self._drag_select_right_panel()
-                                level_one = exact_level_one if exact_level_one else result.get("level_one_codes", [])
-                                new_codes = [c for c in level_one if c not in output_1level_set]
-                                if new_codes:
-                                    level_one_map[code] = new_codes
-                                    if result.get("batch_no"):
-                                        batch_no_map[code] = result["batch_no"]
-                                    output_1level_set.update(new_codes)
-                                    covered_set.update(new_codes)
-                                else:
-                                    level_one_map[code] = []
-                                # 不覆盖整箱兄弟码
-                                covered_set.add(code)
+                            all_codes = result.get("all_codes", set())
+                            covered_set.update(all_codes)  # 全部码加入已覆盖集合排重
+                            
+                            level_one = result.get("level_one_codes", [])
+                            # 筛选尚未输出的1级码
+                            new_codes = [c for c in level_one if c not in output_1level_set]
+                            if new_codes:
+                                level_one_map[code] = new_codes
+                                if result.get("batch_no"):
+                                    batch_no_map[code] = result["batch_no"]
+                                output_1level_set.update(new_codes)
                             else:
-                                # 回退模式：旧行为，全部码覆盖排重
-                                all_codes = result.get("all_codes", set())
-                                covered_set.update(all_codes)
-                                level_one = result.get("level_one_codes", [])
-                                new_codes = [c for c in level_one if c not in output_1level_set]
-                                if new_codes:
-                                    level_one_map[code] = new_codes
-                                    if result.get("batch_no"):
-                                        batch_no_map[code] = result["batch_no"]
-                                    output_1level_set.update(new_codes)
-                                else:
-                                    level_one_map[code] = []
+                                level_one_map[code] = []
                             if callback:
                                 callback(idx, total, code, result)
                             break
@@ -869,8 +792,6 @@ class CalibrateWindow:
             ("copy_btn", "请点击【一键复制所有码】按钮（首次查询前位置）"),
             ("copy_btn_after", "请点击【一键复制所有码】按钮（查询结果后的位置）"),
             ("batch_no_pos", "请点击【产品批号】文字位置（用于复制批号）"),
-            ("right_panel_bottom", "请点击【右侧面板】「共X个追溯码」文字位置"),
-            ("right_panel_top", "请点击【右侧面板】顶部第一个1级码上方空白处"),
         ]
         self.current_step = 0
         self.current_x, self.current_y = 0, 0
@@ -1070,7 +991,7 @@ class DrugTraceApp:
             self.calib_status.config(text="✅ 已校准", fg="#52c41a")
             self.start_btn.config(state=tk.NORMAL if self.input_file else tk.DISABLED)
         elif has_old_cal:
-            self.calib_status.config(text="⚠️ 校准已过期，请重新校准（v3.1新增拖选定位点）", fg="#fa8c16")
+            self.calib_status.config(text="⚠️ 校准已过期，请重新校准（v3.1校准方案变更）", fg="#fa8c16")
             self.start_btn.config(state=tk.DISABLED)
         else:
             self.calib_status.config(text="❌ 未校准，请先校准", fg="#ff4d4f")
